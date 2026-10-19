@@ -29,6 +29,7 @@ in float v_time;
 uniform sampler2D u_tex;
 uniform float u_budget;
 uniform float u_shade;
+uniform vec2 u_style; // x: tint strength inside budget, y: wash strength beyond
 out vec4 outColor;
 void main() {
   vec3 base = texture(u_tex, v_uv).rgb;
@@ -38,11 +39,11 @@ void main() {
   float beyond = smoothstep(1.0, 1.06, t) * u_shade;
   float g = dot(base, vec3(0.299, 0.587, 0.114));
   vec3 washed = mix(vec3(g), vec3(0.80, 0.81, 0.84), 0.45);
-  vec3 col = mix(base, washed, beyond * 0.9);
+  vec3 col = mix(base, washed, beyond * u_style.y);
 
   // Within budget: tint from teal (close) to amber (at the limit).
   vec3 ramp = mix(vec3(0.0, 0.62, 0.58), vec3(1.0, 0.62, 0.12), clamp(t, 0.0, 1.0));
-  col = mix(col, ramp, (1.0 - beyond) * 0.20 * u_shade);
+  col = mix(col, ramp, (1.0 - beyond) * u_style.x * u_shade);
 
   // Contours every quarter of the budget, and a strong line at the budget.
   float q = v_time / (u_budget * 0.25);
@@ -83,7 +84,7 @@ export class WarpRenderer {
     this.prog = prog;
     this.loc = {};
     for (const a of ['a_orig', 'a_dist', 'a_size', 'a_uv', 'a_time']) this.loc[a] = gl.getAttribLocation(prog, a);
-    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_shade'])
+    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_shade', 'u_style'])
       this.loc[u] = gl.getUniformLocation(prog, u);
     this.vao = gl.createVertexArray();
     this.buffers = {};
@@ -95,7 +96,7 @@ export class WarpRenderer {
     this.anisoExt = gl.getExtension('EXT_texture_filter_anisotropic');
     if (this.anisoExt) this.maxAniso = gl.getParameter(this.anisoExt.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
 
-    this.state = { strength: 0, blend: 0, budget: 30, shade: 1, cx: 0, cy: 0, scale: 0.01 };
+    this.state = { strength: 0, blend: 0, budget: 30, shade: 1, tint: 0.2, wash: 0.9, cx: 0, cy: 0, scale: 0.01 };
     this.mesh = null;
     this.overlayDraw = null;
     this.resize();
@@ -188,6 +189,7 @@ export class WarpRenderer {
       gl.uniform1f(this.loc.u_blend, s.blend);
       gl.uniform1f(this.loc.u_budget, s.budget);
       gl.uniform1f(this.loc.u_shade, s.shade);
+      gl.uniform2f(this.loc.u_style, s.tint, s.wash);
       gl.drawElements(gl.TRIANGLES, this.mesh.indices.length, gl.UNSIGNED_SHORT, 0);
     }
     this.drawOverlay();

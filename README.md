@@ -22,7 +22,7 @@ Hover for the travel time at any point; scroll to zoom, drag to pan, double-clic
 
 Road times are sampled on a 24 × 9 polar grid and used to correct a heuristic model on the 128 × 56 render mesh. Train times are **estimates**: lines and connectivity are real, but speeds and frequencies are guessed per line type (or taken from the OSM `interval` tag) since there is no free, keyless timetable API.
 
-Basemap tiles: OpenStreetMap standard tiles (© OpenStreetMap contributors), no API key. Geocoding: Nominatim. None of the services used need an API key.
+Map styles (this branch): Peach / Citrus / Flannel / Auburn draw OpenFreeMap vector tiles (OpenMapTiles schema, no key) with prettymapp-inspired palettes into the warp texture once per destination (`js/vectormap.js`, vendored `pbf` + `@mapbox/vector-tile`); OSM uses raster tiles. Basemap tiles: OpenStreetMap standard tiles (© OpenStreetMap contributors), no API key. Geocoding: Nominatim. None of the services used need an API key.
 
 ## How it works
 

@@ -1,7 +1,8 @@
 // Stitches raster map tiles around the destination into one square canvas
 // that the WebGL renderer uses as a texture.
 
-import { worldPx, EARTH_CIRC } from './geo.js?v=21';
+import { worldPx, EARTH_CIRC } from './geo.js?v=23';
+import { buildVectorBasemap, THEMES } from './vectormap.js?v=23';
 
 // OpenStreetMap's standard tiles: free, no API key, CORS-enabled. To stay
 // within the OSM tile usage policy we fetch a modest number of 256px tiles
@@ -26,7 +27,9 @@ function loadImage(src) {
 
 // Returns { canvas, size, z, tileSize, ox, oy, uv(lat,lng), done: Promise }.
 // `onProgress` is called (throttled by the caller) as tiles arrive.
-export function buildBasemap(center, radius, maxTex, onProgress, signal) {
+// Square texture layout around `center` covering +-radius: Web Mercator zoom
+// z with 256px tiles, origin (ox, oy) in world pixels, and lat/lng -> uv.
+export function textureLayout(center, radius, maxTex) {
   const size = Math.min(2048, maxTex);
   const tileSize = 256;
   const lat = center.lat;
@@ -34,6 +37,19 @@ export function buildBasemap(center, radius, maxTex, onProgress, signal) {
   const ppm = (z) => (tileSize * Math.pow(2, z)) / (EARTH_CIRC * Math.cos((lat * Math.PI) / 180));
   let z = Math.floor(Math.log2(size / (2 * radius * ppm(0))));
   z = Math.max(1, Math.min(SOURCES[0].maxZoom, z));
+  const [cx, cy] = worldPx(center.lat, center.lng, z, tileSize);
+  const ox = cx - size / 2;
+  const oy = cy - size / 2;
+  const uv = (la, ln) => {
+    const [wx, wy] = worldPx(la, ln, z, tileSize);
+    return [(wx - ox) / size, (wy - oy) / size];
+  };
+  return { size, tileSize, z, cx, cy, ox, oy, uv };
+}
+
+export function buildBasemap(center, radius, maxTex, onProgress, signal, theme = 'osm') {
+  if (theme !== 'osm') return buildVectorBasemap(textureLayout(center, radius, maxTex), THEMES[theme] || THEMES.peach, onProgress, signal);
+  const { size, tileSize, z, cx, cy, ox, oy, uv } = textureLayout(center, radius, maxTex);
 
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
@@ -41,9 +57,6 @@ export function buildBasemap(center, radius, maxTex, onProgress, signal) {
   ctx.fillStyle = '#e9e6df';
   ctx.fillRect(0, 0, size, size);
 
-  const [cx, cy] = worldPx(center.lat, center.lng, z, tileSize);
-  const ox = cx - size / 2;
-  const oy = cy - size / 2;
   const n = Math.pow(2, z);
   const tiles = [];
   for (let ty = Math.floor(oy / tileSize); ty <= Math.floor((oy + size) / tileSize); ty++) {
@@ -53,11 +66,6 @@ export function buildBasemap(center, radius, maxTex, onProgress, signal) {
     }
   }
   tiles.sort((a, b) => a.d - b.d); // centre first
-
-  const uv = (la, ln) => {
-    const [wx, wy] = worldPx(la, ln, z, tileSize);
-    return [(wx - ox) / size, (wy - oy) / size];
-  };
 
   let sourceIdx = 0;
   let failures = 0;

@@ -1,8 +1,9 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=21';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=21';
-import { buildBasemap } from './basemap.js?v=21';
-import { WarpRenderer } from './renderer.js?v=21';
-import { fromLocal } from './geo.js?v=21';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=23';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=23';
+import { buildBasemap } from './basemap.js?v=23';
+import { THEMES } from './vectormap.js?v=23';
+import { WarpRenderer } from './renderer.js?v=23';
+import { fromLocal } from './geo.js?v=23';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -18,6 +19,7 @@ const state = {
   mode: 'drive',
   budget: 30,
   view: 'distance',
+  theme: 'peach', // 'osm' or a key of THEMES (vectormap.js)
   picking: true,
 };
 
@@ -346,7 +348,7 @@ function dataKey() {
 const basemapCache = new Map();
 
 function getBasemap(dest, radius) {
-  const key = `${dest.lat.toFixed(5)},${dest.lng.toFixed(5)}|${Math.round(radius)}`;
+  const key = `${dest.lat.toFixed(5)},${dest.lng.toFixed(5)}|${Math.round(radius)}|${state.theme}`;
   if (basemapCache.has(key)) return basemapCache.get(key);
   let pending = false;
   const bm = buildBasemap(dest, radius, renderer.maxTex, (done, total) => {
@@ -364,13 +366,13 @@ function getBasemap(dest, radius) {
         anim.dirty = true;
       }
     }, 250);
-  });
+  }, undefined, state.theme);
   bm.done.then((info) => {
     if (data?.basemap === bm) {
       renderer.setTexture(bm.canvas);
       anim.dirty = true;
     }
-    $('#tiles-src').textContent = info.loaded ? info.source : 'unavailable (offline)';
+    $('#tiles-src').textContent = info.loaded ? info.source + (state.theme === 'osm' ? '' : ' · © OpenMapTiles') : 'unavailable (offline)';
     if (data?.basemap === bm) {
       loading.tiles = null;
       loading.tilesPct = null;
@@ -585,6 +587,30 @@ function formatMinutes(m) {
   const r = m % 60;
   return r ? `${h} h ${r} min` : `${h} h`;
 }
+
+// Poster palettes are already strong: lighter time tint and wash on them.
+function applyThemeShading() {
+  if (!renderer) return;
+  const poster = state.theme !== 'osm';
+  renderer.state.tint = poster ? 0.1 : 0.2;
+  renderer.state.wash = poster ? 0.55 : 0.9;
+  anim.dirty = true;
+}
+
+// Map style: swapping only rebuilds the texture (same layout, same uv).
+document.querySelectorAll('[data-theme]').forEach((b) =>
+  b.addEventListener('click', () => {
+    state.theme = b.dataset.theme;
+    applyThemeShading();
+    syncControls();
+    writeHash();
+    if (!data) return;
+    const bm = getBasemap(state.dest, data.mesh.radius);
+    data.basemap = bm;
+    renderer.setTexture(bm.canvas);
+    anim.dirty = true;
+  }),
+);
 
 $('#pick-btn').addEventListener('click', () => showWarp(false));
 $('#example-btn').addEventListener('click', () => {
@@ -802,13 +828,15 @@ window.addEventListener('resize', () => {
 
 function writeHash() {
   if (!state.dest) return;
-  const h = `#${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)},${state.mode},${state.budget},${state.view}`;
+  const h = `#${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)},${state.mode},${state.budget},${state.view},${state.theme}`;
   if (location.hash !== h) history.replaceState(null, '', h);
 }
 
 function syncControls() {
   document.querySelectorAll('[data-mode]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.mode === state.mode));
   document.querySelectorAll('[data-view]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.view === state.view));
+  document.querySelectorAll('[data-theme]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.theme === state.theme));
+  applyThemeShading();
   budgetInput.value = budgetIndex(state.budget);
   $('#budget-val').textContent = formatMinutes(state.budget);
   $('#legend-max').textContent = formatMinutes(state.budget);
@@ -824,6 +852,7 @@ function readHash() {
   if (MODES[m[2]]) state.mode = m[2];
   if (Number(m[3]) >= 5 && Number(m[3]) <= 720) state.budget = Number(m[3]);
   if (VIEWS[m[4]]) state.view = m[4];
+  if (m[5] === 'osm' || THEMES[m[5]]) state.theme = m[5];
   syncControls();
   map.setView([lat, lng], 12);
   setDestination({ lat, lng }, null);

@@ -6,9 +6,9 @@
     <title>Time Warp Map</title>
     <meta name="description" content="A map that warps by travel time: closer in time means closer in space, or bigger." />
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="style.css?v=21" />
+    <link rel="stylesheet" href="style.css?v=23" />
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script type="module" src="js/main.js?v=21"></script>
+    <script type="module" src="js/main.js?v=23"></script>
   </head>
   <body>
     <aside id="panel">
@@ -58,6 +58,17 @@
           <button type="button" data-view="size" aria-pressed="false">
             <b>Time = size</b><small>Quicker places grow, slower places shrink</small>
           </button>
+        </div>
+      </section>
+
+      <section>
+        <h2><span class="step">5</span> Map style</h2>
+        <div class="seg seg-themes" role="group" aria-label="Map style">
+          <button type="button" data-theme="peach" aria-pressed="true"><i style="--a:#FFC857;--b:#E9724C;--c:#A8E1E6"></i>Peach</button>
+          <button type="button" data-theme="citrus" aria-pressed="false"><i style="--a:#F9C80E;--b:#EA3546;--c:#93C5C6"></i>Citrus</button>
+          <button type="button" data-theme="flannel" aria-pressed="false"><i style="--a:#C44536;--b:#197278;--c:#9DB4C0"></i>Flannel</button>
+          <button type="button" data-theme="auburn" aria-pressed="false"><i style="--a:#9E2A2B;--b:#E09F3E;--c:#7FA7B5"></i>Auburn</button>
+          <button type="button" data-theme="osm" aria-pressed="false"><i style="--a:#f2efe9;--b:#aad3df;--c:#cdebb0"></i>OSM</button>
         </div>
       </section>
 
