@@ -59,7 +59,10 @@ void main() {
   // lightened a little. The switch is about one pixel wide - right under the
   // red budget line - so no coloured fringe is left outside the envelope.
   float edge = max(fwidth(t), 1e-4);
-  float beyond = smoothstep(1.0 - edge, 1.0 + edge, t) * u_shade;
+  // One-sided: only times at or under the limit keep colour (plus half a
+  // pixel of anti-aliasing). A symmetric band grew with zoom-out and lit up
+  // near-misses as faint ghost areas.
+  float beyond = smoothstep(1.0, 1.0 + 0.5 * edge, t) * u_shade;
   float g = dot(base, vec3(0.299, 0.587, 0.114));
   vec3 washed = mix(vec3(g), vec3(0.93), u_style.y);
   vec3 col = mix(base, washed, beyond);
@@ -76,8 +79,11 @@ void main() {
   col = mix(col, vec3(0.16, 0.20, 0.27), minor * 0.35 * u_shade);
 
   float wt = max(fwidth(vt), 1e-4);
-  float dt = abs(vt - u_limit) / wt;
-  float major = 1.0 - smoothstep(1.0, 2.4, dt);
+  // Budget line on the inside of the limit (about 2 px wide), with only a
+  // half-pixel fade outside, so places that never reach the limit get no
+  // line at any zoom.
+  float din = (u_limit - vt) / wt;
+  float major = din >= 0.0 ? 1.0 - smoothstep(1.4, 2.4, din) : 1.0 - smoothstep(0.0, 0.5, -din);
   col = mix(col, vec3(0.87, 0.15, 0.33), major * 0.95 * u_shade);
 
   outColor = vec4(col, 1.0);
