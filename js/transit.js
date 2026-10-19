@@ -15,7 +15,7 @@
 // best time to the destination using only real lines and paying for waits and
 // transfers. Map points then add the time to reach a station.
 
-import { toLocal, bboxAround } from './geo.js?v=7';
+import { toLocal, bboxAround } from './geo.js?v=8';
 
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 
@@ -210,7 +210,7 @@ export function stationTimes(net, egress) {
 
   // Exit edges: alight at a stop and walk / take a feeder to the destination.
   for (let s = 0; s < S; s++) {
-    const e = egress(stations[s]);
+    const e = egress(stations[s], s);
     for (const n of atStation[s]) {
       if (e < dist[n]) {
         dist[n] = e;

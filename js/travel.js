@@ -10,8 +10,8 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=7';
-import { fetchNetwork, stationTimes } from './transit.js?v=7';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=8';
+import { fetchNetwork, stationTimes } from './transit.js?v=8';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -313,18 +313,21 @@ function bestFromStationsOnly(stations) {
 
 // Per mesh vertex: soft minimum over "go directly" and "get to station k,
 // then best[k] from there", so station catchment boundaries blend instead of
-// forming sharp creases.
-function timesViaStations(mesh, stations, best) {
+// forming sharp creases. `access(v, k, d)` is the time from vertex v to
+// station k (k = -1 means straight to the destination); d is crow-fly metres.
+const crowAccess = (v, k, d) => stationAccess(d);
+
+function timesViaStations(mesh, stations, best, access = crowAccess) {
   const TAU = 1.5;
   const times = new Float32Array(mesh.count);
   for (let v = 0; v < mesh.count; v++) {
     const x = mesh.x[v];
     const y = mesh.y[v];
-    let m = stationAccess(Math.hypot(x, y));
+    let m = access(v, -1, Math.hypot(x, y));
     let sum = 1;
     for (let k = 0; k < stations.length; k++) {
       const s = stations[k];
-      const c = stationAccess(Math.hypot(x - s.x, y - s.y)) + best[k];
+      const c = access(v, k, Math.hypot(x - s.x, y - s.y)) + best[k];
       if (c < m) {
         sum = sum * Math.exp((c - m) / TAU) + 1;
         m = c;
@@ -337,18 +340,222 @@ function timesViaStations(mesh, stations, best) {
   return times;
 }
 
-async function trainTimes(dest, mesh, signal, onStatus) {
+// ---------------------------------------------------------------------------
+// Real walking routes for the station legs.
+//
+// Crow-fly walking ignores rivers, motorways and rail yards. Routing every
+// mesh vertex to every station is far too many requests, so:
+//   1. a first pass with crow-fly access gives each vertex a rough time;
+//   2. only vertices inside the budget envelope or near its frontier are
+//      refined, and only for stations within walking range that could
+//      plausibly be their best choice (plus walking straight to the
+//      destination);
+//   3. those (vertex, station) pairs are sampled, batched into OSRM foot
+//      "table" requests, and turned into per-station detour ratios;
+//   4. every vertex near a sampled station uses the measured time if it was
+//      sampled, otherwise the crow-fly estimate scaled by the ratio of the
+//      nearest sample for that station.
+
+const FOOT_TABLE = 'https://routing.openstreetmap.de/routed-foot/table/v1/foot';
+const WALK_RANGE = 1500; // crow-fly metres considered "walkable" to a station
+const MAX_COORDS = 100; // per OSRM table request
+const MAX_REQUESTS = 40;
+const crowWalk = (d) => (d * 1.25) / 75;
+const feeder = (d) => (d * 1.25 > 1500 ? stationAccess(d) : Infinity);
+
+// Minutes walking from each source to each target (sources x targets).
+async function footMatrix(sources, targets, signal) {
+  const all = [...targets, ...sources];
+  const coords = all.map((p) => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(';');
+  const src = sources.map((_, i) => i + targets.length).join(';');
+  const dst = targets.map((_, i) => i).join(';');
+  const json = await fetchJson(`${FOOT_TABLE}/${coords}?sources=${src}&destinations=${dst}&annotations=duration`, signal);
+  if (json.code !== 'Ok' || !json.durations) throw new Error(json.message || json.code || 'bad response');
+  return sources.map((_, i) => {
+    const snap = json.sources?.[i]?.distance ?? 0;
+    return targets.map((_, j) => {
+      const sec = json.durations[i]?.[j];
+      return sec == null ? NaN : sec / 60 + snap / 70;
+    });
+  });
+}
+
+// Real walking time from the destination to stations near it (egress leg).
+async function realEgress(dest, stations, signal) {
+  const near = [];
+  stations.forEach((s, k) => {
+    if (Math.hypot(s.x, s.y) <= WALK_RANGE) near.push(k);
+  });
+  const out = new Map();
+  for (let i = 0; i < near.length; i += MAX_COORDS - 1) {
+    const chunk = near.slice(i, i + MAX_COORDS - 1);
+    const m = await footMatrix(
+      chunk.map((k) => fromLocal(dest, stations[k].x, stations[k].y)),
+      [dest],
+      signal,
+    );
+    chunk.forEach((k, n) => Number.isFinite(m[n][0]) && out.set(k, m[n][0]));
+  }
+  return out;
+}
+
+async function refineAccess(dest, mesh, stations, best, envelope, signal, onStatus) {
+  const first = timesViaStations(mesh, stations, best);
+  const DEST = stations.length; // pseudo-station: walk straight to the destination
+  const pos = (k) => (k === DEST ? { x: 0, y: 0 } : stations[k]);
+  const bestOf = (k) => (k === DEST ? 0 : best[k]);
+
+  // Stations in walking range of each vertex in the envelope band.
+  const pairs = new Map(); // station -> vertex ids
+  const grid = new Map();
+  stations.forEach((s, k) => {
+    const key = `${Math.floor(s.x / WALK_RANGE)},${Math.floor(s.y / WALK_RANGE)}`;
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key).push(k);
+  });
+  const nearby = (x, y) => {
+    const cx = Math.floor(x / WALK_RANGE);
+    const cy = Math.floor(y / WALK_RANGE);
+    const out = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) out.push(...(grid.get(`${cx + dx},${cy + dy}`) || []));
+    return out;
+  };
+  for (let v = 0; v < mesh.count; v++) {
+    if (first[v] > envelope) continue;
+    const x = mesh.x[v];
+    const y = mesh.y[v];
+    const cands = nearby(x, y);
+    if (Math.hypot(x, y) <= WALK_RANGE) cands.push(DEST);
+    for (const k of cands) {
+      const p = pos(k);
+      const d = Math.hypot(x - p.x, y - p.y);
+      if (d > WALK_RANGE) continue;
+      // Only stations that could plausibly be this vertex's best choice.
+      if (crowWalk(d) + bestOf(k) > first[v] + 10) continue;
+      if (!pairs.has(k)) pairs.set(k, []);
+      pairs.get(k).push(v);
+    }
+  }
+  if (!pairs.size) return { times: first, refined: 0 };
+
+  // Thin samples per station so everything fits in MAX_REQUESTS requests.
+  const stationIds = [...pairs.keys()];
+  let total = 0;
+  for (const k of stationIds) total += pairs.get(k).length + 1;
+  const keepFrac = Math.min(1, (MAX_REQUESTS * MAX_COORDS) / total);
+  for (const k of stationIds) {
+    const vs = pairs.get(k);
+    const n = Math.max(3, Math.min(MAX_COORDS - 1, Math.round(vs.length * keepFrac)));
+    if (vs.length > n) pairs.set(k, Array.from({ length: n }, (_, i) => vs[Math.floor((i * vs.length) / n)]));
+  }
+
+  // Pack stations (targets) and their vertices (sources) into requests.
+  const batches = [];
+  let cur = { targets: [], sources: new Set() };
+  for (const k of stationIds) {
+    const vs = pairs.get(k);
+    const extra = 1 + vs.filter((v) => !cur.sources.has(v)).length;
+    if (cur.targets.length && cur.targets.length + cur.sources.size + extra > MAX_COORDS) {
+      batches.push(cur);
+      cur = { targets: [], sources: new Set() };
+    }
+    cur.targets.push(k);
+    vs.forEach((v) => cur.sources.add(v));
+  }
+  if (cur.targets.length) batches.push(cur);
+  batches.length = Math.min(batches.length, MAX_REQUESTS);
+
+  // samples[k] = list of { x, y, ratio } measured around station k
+  const samples = new Map();
+  const measured = new Map(); // `${v},${k}` -> minutes
+  const ll = (x, y) => fromLocal(dest, x, y);
+  let done = 0;
+  const queue = batches.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const b = queue.shift();
+      const src = [...b.sources];
+      const m = await footMatrix(
+        src.map((v) => ll(mesh.x[v], mesh.y[v])),
+        b.targets.map((k) => (k === DEST ? dest : ll(pos(k).x, pos(k).y))),
+        signal,
+      );
+      src.forEach((v, i) =>
+        b.targets.forEach((k, j) => {
+          const w = m[i][j];
+          if (!Number.isFinite(w)) return;
+          const p = pos(k);
+          const d = Math.hypot(mesh.x[v] - p.x, mesh.y[v] - p.y);
+          if (d > WALK_RANGE) return;
+          measured.set(`${v},${k}`, w);
+          if (!samples.has(k)) samples.set(k, []);
+          samples.get(k).push({ x: mesh.x[v], y: mesh.y[v], ratio: w / Math.max(0.5, crowWalk(d)) });
+        }),
+      );
+      onStatus?.(`Walking routes to stations… ${Math.round((100 * ++done) / batches.length)}%`);
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+
+  const access = (v, k, d) => {
+    if (k === -1) k = DEST;
+    if (d > WALK_RANGE) return stationAccess(d);
+    const w = measured.get(`${v},${k}`);
+    if (w != null) return Math.min(w, feeder(d));
+    const list = samples.get(k);
+    if (!list) return stationAccess(d);
+    const x = mesh.x[v];
+    const y = mesh.y[v];
+    let bestD = Infinity;
+    let ratio = 1;
+    for (const smp of list) {
+      const dd = (smp.x - x) ** 2 + (smp.y - y) ** 2;
+      if (dd < bestD) {
+        bestD = dd;
+        ratio = smp.ratio;
+      }
+    }
+    return Math.min(crowWalk(d) * ratio, feeder(d));
+  };
+  return { times: timesViaStations(mesh, stations, best, access), refined: measured.size };
+}
+
+async function trainTimes(dest, mesh, signal, onStatus, budget) {
   onStatus?.('Loading rail lines…');
   const net = await fetchNetwork(dest, mesh.radius * 1.15, signal);
   if (net && net.lines.length) {
+    // Walk from the last station to the destination along real paths.
+    let egress = new Map();
+    try {
+      onStatus?.('Walking routes from the destination…');
+      egress = await realEgress(dest, net.stations, signal);
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      console.warn('Egress walking routes failed:', err);
+    }
     onStatus?.('Routing through the rail network…');
-    const best = stationTimes(net, (s) => stationAccess(Math.hypot(s.x, s.y)));
+    const best = stationTimes(net, (s, k) => egress.get(k) ?? stationAccess(Math.hypot(s.x, s.y)));
     const idx = [];
     for (let k = 0; k < net.stations.length; k++) if (Number.isFinite(best[k])) idx.push(k);
     const stations = idx.map((k) => net.stations[k]);
+    const bestList = idx.map((k) => best[k]);
+
+    let times;
+    let walkNote;
+    try {
+      const envelope = budget + Math.max(10, 0.25 * budget);
+      const res = await refineAccess(dest, mesh, stations, bestList, envelope, signal, onStatus);
+      times = res.times;
+      walkNote = `${res.refined + egress.size} walking routes`;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      console.warn('Access walking routes failed:', err);
+      times = timesViaStations(mesh, stations, bestList);
+      walkNote = 'walking estimated';
+    }
     return {
-      times: timesViaStations(mesh, stations, idx.map((k) => best[k])),
-      source: `${net.lines.length} OSM rail lines, ${stations.length} stations + network model`,
+      times,
+      source: `${net.lines.length} OSM rail lines, ${stations.length} stations, ${walkNote}`,
       stations,
       lines: net.lines.map((l) => ({ metro: l.metro, colour: l.colour, pts: l.seq.map((s) => net.stations[s]) })),
     };
@@ -378,8 +585,8 @@ export function heuristicTimes(mode, mesh) {
 }
 
 // Returns { times: Float32Array (per mesh vertex), source: string, stations?, lines? }
-export async function computeTimes(dest, mode, mesh, signal, onStatus) {
-  if (mode === 'train') return trainTimes(dest, mesh, signal, onStatus);
+export async function computeTimes(dest, mode, mesh, signal, onStatus, budget = 60) {
+  if (mode === 'train') return trainTimes(dest, mesh, signal, onStatus, budget);
   const res = await roadTimes(dest, mode, mesh, signal, onStatus);
   if (res) return res;
   return { times: heuristicTimes(mode, mesh), source: 'Routing servers unreachable — estimate' };

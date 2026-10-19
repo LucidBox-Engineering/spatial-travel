@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=7';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=7';
-import { buildBasemap } from './basemap.js?v=7';
-import { WarpRenderer } from './renderer.js?v=7';
-import { fromLocal } from './geo.js?v=7';
+import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=8';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=8';
+import { buildBasemap } from './basemap.js?v=8';
+import { WarpRenderer } from './renderer.js?v=8';
+import { fromLocal } from './geo.js?v=8';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -320,7 +320,7 @@ async function reload() {
   try {
     const res = await computeTimes(state.dest, state.mode, mesh, signal, (msg) => {
       if (token === loadToken) setStatus(msg, 'busy');
-    });
+    }, bucket);
     if (token !== loadToken) return;
     data.times = res.times;
     data.source = res.source;
