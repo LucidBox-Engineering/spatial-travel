@@ -30,7 +30,8 @@ Basemap tiles: OpenStreetMap standard tiles (© OpenStreetMap contributors), no 
 - `js/renderer.js` – WebGL2: the stitched tile image is a texture on the mesh; vertex positions morph between geographic, distance and size layouts; the fragment shader draws the time tint, contours and the budget line.
 - `js/basemap.js` – stitches tiles into one texture.
 - `js/travel.js` – travel-time providers and models.
-- `js/transit.js` – OSM rail-line network and Dijkstra routing for train mode.
+- `js/transit.js` – OSM rail-line network and Dijkstra routing for train mode; Overpass failover across public instances.
+- `js/cache.js` – memory + IndexedDB cache (7-day expiry) for rail data and routing responses.
 - `js/main.js` – UI.
 
 No build step. Run locally with any static server, e.g. `npx http-server .`. Deployed to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`.

@@ -10,8 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=13';
-import { fetchNetwork, stationTimes } from './transit.js?v=13';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=14';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=14';
+import { cached, DAY } from './cache.js?v=14';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -79,12 +80,11 @@ export function extentFor(mode, budget) {
 // The free FOSSGIS routing server rate-limits per client (HTTP 429), so
 // requests to it are spaced out, a 429 is retried once after the server's
 // Retry-After, and repeated 429s pause all requests to it for a while (callers
-// then fall back to estimates). Successful responses are cached so switching
-// modes or views and coming back doesn't re-request.
+// then fall back to estimates). Successful responses are cached (see
+// cache.js) so revisiting a destination doesn't re-request.
 const THROTTLED = {
   'routing.openstreetmap.de': { gap: 1100, next: 0, chain: Promise.resolve(), pausedUntil: 0 },
 };
-const responseCache = new Map();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function takeSlot(th) {
@@ -100,8 +100,12 @@ async function takeSlot(th) {
 
 async function fetchJson(url, signal, timeoutMs = 20000, init = {}) {
   const th = THROTTLED[new URL(url).host];
-  const cacheable = th && !init.method;
-  if (cacheable && responseCache.has(url)) return responseCache.get(url);
+  // Routing responses are cached for a week (memory + IndexedDB).
+  if (th && !init.method) return cached(`http:${url}`, 7 * DAY, () => fetchJsonNet(url, signal, timeoutMs, init, th));
+  return fetchJsonNet(url, signal, timeoutMs, init, th);
+}
+
+async function fetchJsonNet(url, signal, timeoutMs, init, th) {
   for (let attempt = 0; ; attempt++) {
     if (th) {
       if (Date.now() < th.pausedUntil) throw new Error('rate limited: pausing requests');
@@ -128,12 +132,7 @@ async function fetchJson(url, signal, timeoutMs = 20000, init = {}) {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       if (th) th.gap = Math.max(1100, th.gap * 0.9); // ease back after backing off
-      const json = await res.json();
-      if (cacheable) {
-        if (responseCache.size > 300) responseCache.delete(responseCache.keys().next().value);
-        responseCache.set(url, json);
-      }
-      return json;
+      return await res.json();
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
@@ -288,7 +287,6 @@ function correctHeuristic(mode, mesh, samples, observed) {
 // Train: OSM rail lines (see transit.js), falling back to station
 // locations with a station-to-station model when no line data exists.
 
-const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 
 async function fetchStations(dest, radius, signal) {
   const b = bboxAround(dest, radius);
@@ -306,37 +304,29 @@ async function fetchStations(dest, radius, signal) {
     nwr["station"~"^(subway|light_rail)$"](${bbox});
   );out center tags;`;
   const cell = Math.max(150, radius / 70);
-  for (const url of OVERPASS) {
-    try {
-      const json = await fetchJson(url, signal, regional ? 75000 : 30000, {
-        method: 'POST',
-        body: 'data=' + encodeURIComponent(q),
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      });
-      const stations = [];
-      const seen = new Set();
-      for (const el of json.elements || []) {
-        const lat = el.lat ?? el.center?.lat;
-        const lng = el.lon ?? el.center?.lon;
-        if (lat == null) continue;
-        const t = el.tags || {};
-        if (t.railway === 'tram_stop' || t.station === 'tram' || t.disused || t['abandoned:railway']) continue;
-        const [x, y] = toLocal(dest, lat, lng);
-        const metro = t.station === 'subway' || t.subway === 'yes' || t.station === 'light_rail';
-        // de-duplicate station nodes / areas mapped twice (and thin out
-        // dense areas at large scales): keep one station per grid cell
-        const key = `${Math.floor(x / cell)},${Math.floor(y / cell)}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        stations.push({ x, y, metro, name: t.name || '' });
-      }
-      return stations;
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      console.warn(`Overpass ${url} failed:`, err);
+  const key = `stations:${dest.lat.toFixed(4)},${dest.lng.toFixed(4)}:${Math.round(radius)}`;
+  return cached(key, 7 * DAY, async () => {
+    const json = await overpass(q, signal, regional ? 75000 : 30000);
+    if (!json) return null;
+    const stations = [];
+    const seen = new Set();
+    for (const el of json.elements || []) {
+      const lat = el.lat ?? el.center?.lat;
+      const lng = el.lon ?? el.center?.lon;
+      if (lat == null) continue;
+      const t = el.tags || {};
+      if (t.railway === 'tram_stop' || t.station === 'tram' || t.disused || t['abandoned:railway']) continue;
+      const [x, y] = toLocal(dest, lat, lng);
+      const metro = t.station === 'subway' || t.subway === 'yes' || t.station === 'light_rail';
+      // de-duplicate station nodes / areas mapped twice (and thin out
+      // dense areas at large scales): keep one station per grid cell
+      const k = `${Math.floor(x / cell)},${Math.floor(y / cell)}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      stations.push({ x, y, metro, name: t.name || '' });
     }
-  }
-  return null;
+    return stations;
+  });
 }
 
 function rideTime(a, b) {
@@ -641,7 +631,12 @@ async function trainTimes(dest, mesh, signal, onStatus, budget) {
       lines: net.lines.map((l) => ({ metro: l.metro, colour: l.colour, pts: l.seq.map((s) => net.stations[s]) })),
     };
   }
-  // No route data: fall back to station locations only.
+  // Every Overpass instance failed: don't queue another heavy query against
+  // the same busy servers, just use the estimate.
+  if (net === null) {
+    return { times: heuristicTimes('train', mesh), source: 'Rail data servers unavailable — estimate' };
+  }
+  // Area has no route data: fall back to station locations only.
   onStatus?.('Finding train stations…');
   const stations = await fetchStations(dest, mesh.radius * 1.15, signal);
   if (stations && stations.length) {

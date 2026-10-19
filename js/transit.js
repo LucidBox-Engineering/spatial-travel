@@ -15,37 +15,82 @@
 // best time to the destination using only real lines and paying for waits and
 // transfers. Map points then add the time to reach a station.
 
-import { toLocal, bboxAround } from './geo.js?v=13';
+import { toLocal, bboxAround } from './geo.js?v=14';
+import { cached, DAY } from './cache.js?v=14';
 
-const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+// Public Overpass instances, tried in order. overpass-api.de often answers
+// 502/504 under load (without CORS headers, so browsers report a CORS error).
+const OVERPASS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+const HEDGE_MS = 8000; // if an instance is this slow, also ask the next one
 
 const MERGE_DIST = 300; // metres: stops closer than this form one station
 const TRANSFER = 3; // minutes to change between lines at a station
 
-async function overpass(q, signal, timeoutMs) {
-  for (const url of OVERPASS) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const onAbort = () => ctrl.abort();
+// POST an Overpass query. A failing instance falls through to the next one
+// immediately; a slow one gets "hedged" by also asking the next instance
+// after HEDGE_MS. The first good answer wins and the others are aborted.
+// Resolves to null if every instance fails.
+export function overpass(q, signal, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const ctrls = [];
+    let next = 0;
+    let pending = 0;
+    let done = false;
+    let hedge = null;
+    const settle = (fn, v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(hedge);
+      ctrls.forEach((c) => c.abort());
+      signal?.removeEventListener('abort', onAbort);
+      fn(v);
+    };
+    const onAbort = () => settle(reject, new DOMException('Aborted', 'AbortError'));
+    if (signal?.aborted) return onAbort();
     signal?.addEventListener('abort', onAbort);
-    try {
-      const res = await fetch(url, {
+    const launch = () => {
+      if (done) return;
+      if (next >= OVERPASS.length) {
+        if (!pending) settle(resolve, null);
+        return;
+      }
+      const url = OVERPASS[next++];
+      pending++;
+      const ctrl = new AbortController();
+      ctrls.push(ctrl);
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      clearTimeout(hedge);
+      hedge = setTimeout(launch, HEDGE_MS);
+      fetch(url, {
         method: 'POST',
         body: 'data=' + encodeURIComponent(q),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         signal: ctrl.signal,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      console.warn(`Overpass ${url} failed:`, err);
-    } finally {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-    }
-  }
-  return null;
+      })
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const json = await res.json();
+          // Server-side timeouts come back as 200 with a remark and no data.
+          if (json.remark && /error|timed out/i.test(json.remark) && !json.elements?.length) throw new Error(json.remark);
+          return json;
+        })
+        .then(
+          (json) => settle(resolve, json),
+          (err) => {
+            if (!done) console.warn(`Overpass ${url} failed:`, err?.message || err);
+            pending--;
+            launch();
+          },
+        )
+        .finally(() => clearTimeout(timer));
+    };
+    launch();
+  });
 }
 
 // Minutes from the "interval" tag (e.g. "10", "00:10", "PT10M"), or null.
@@ -273,7 +318,11 @@ rel["type"="route"]["route"~"^(${routes})$"](${bbox})->.routes;
 .routes out body;
 node(r.routes);
 out skel qt;`;
-  const json = await overpass(q, signal, regional ? 100000 : 50000);
-  if (!json) return null;
-  return parseNetwork(json, dest);
+  // Cached for a week per area (memory + IndexedDB). Failures (null) are
+  // not cached.
+  const key = `rail:${dest.lat.toFixed(4)},${dest.lng.toFixed(4)}:${Math.round(radius)}`;
+  return cached(key, 7 * DAY, async () => {
+    const json = await overpass(q, signal, regional ? 100000 : 50000);
+    return json ? parseNetwork(json, dest) : null;
+  });
 }
