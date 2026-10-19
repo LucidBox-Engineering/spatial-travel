@@ -10,8 +10,8 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=11';
-import { fetchNetwork, stationTimes } from './transit.js?v=11';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=12';
+import { fetchNetwork, stationTimes } from './transit.js?v=12';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -358,6 +358,7 @@ function timesViaStations(mesh, stations, best, access = crowAccess) {
 //      sampled, otherwise the crow-fly estimate scaled by the ratio of the
 //      nearest sample for that station.
 
+const INTERCITY_RADIUS = 150000; // fetch radius in metres; same as the mainline-only switch in transit.js
 const FOOT_TABLE = 'https://routing.openstreetmap.de/routed-foot/table/v1/foot';
 const WALK_RANGE = 1500; // crow-fly metres considered "walkable" to a station
 const MAX_COORDS = 100; // per OSRM table request
@@ -540,16 +541,23 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
 
 async function trainTimes(dest, mesh, signal, onStatus, budget) {
   onStatus?.('Loading rail lines…');
-  const net = await fetchNetwork(dest, mesh.radius * 1.15, signal);
+  const fetchRadius = mesh.radius * 1.15;
+  const net = await fetchNetwork(dest, fetchRadius, signal);
   if (net && net.lines.length) {
+    // At inter-city scale (the same threshold that switches to mainline
+    // rail only) a few minutes of walking detour barely matters, so skip
+    // the walking-route requests and use crow-fly estimates.
+    const intercity = fetchRadius > INTERCITY_RADIUS;
     // Walk from the last station to the destination along real paths.
     let egress = new Map();
-    try {
-      onStatus?.('Walking routes from the destination…');
-      egress = await realEgress(dest, net.stations, signal);
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      console.warn('Egress walking routes failed:', err);
+    if (!intercity) {
+      try {
+        onStatus?.('Walking routes from the destination…');
+        egress = await realEgress(dest, net.stations, signal);
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        console.warn('Egress walking routes failed:', err);
+      }
     }
     onStatus?.('Routing through the rail network…');
     const best = stationTimes(net, (s, k) => egress.get(k) ?? stationAccess(Math.hypot(s.x, s.y)));
@@ -560,16 +568,21 @@ async function trainTimes(dest, mesh, signal, onStatus, budget) {
 
     let times;
     let walkNote;
-    try {
-      const envelope = budget + Math.max(10, 0.25 * budget);
-      const res = await refineAccess(dest, mesh, stations, bestList, envelope, signal, onStatus);
-      times = res.times;
-      walkNote = `${res.refined + egress.size} walking routes`;
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      console.warn('Access walking routes failed:', err);
+    if (intercity) {
       times = timesViaStations(mesh, stations, bestList);
-      walkNote = 'walking estimated';
+      walkNote = 'walking estimated (inter-city)';
+    } else {
+      try {
+        const envelope = budget + Math.max(10, 0.25 * budget);
+        const res = await refineAccess(dest, mesh, stations, bestList, envelope, signal, onStatus);
+        times = res.times;
+        walkNote = `${res.refined + egress.size} walking routes`;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        console.warn('Access walking routes failed:', err);
+        times = timesViaStations(mesh, stations, bestList);
+        walkNote = 'walking estimated';
+      }
     }
     return {
       times,
