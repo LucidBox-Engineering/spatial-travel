@@ -15,7 +15,7 @@
 // best time to the destination using only real lines and paying for waits and
 // transfers. Map points then add the time to reach a station.
 
-import { toLocal, bboxAround } from './geo.js?v=10';
+import { toLocal, bboxAround } from './geo.js?v=11';
 
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 

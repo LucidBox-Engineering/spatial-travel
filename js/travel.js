@@ -10,8 +10,8 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=10';
-import { fetchNetwork, stationTimes } from './transit.js?v=10';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=11';
+import { fetchNetwork, stationTimes } from './transit.js?v=11';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -350,8 +350,10 @@ function timesViaStations(mesh, stations, best, access = crowAccess) {
 //      refined, and only for stations within walking range that could
 //      plausibly be their best choice (plus walking straight to the
 //      destination);
-//   3. those (vertex, station) pairs are sampled, batched into OSRM foot
-//      "table" requests, and turned into per-station detour ratios;
+//   3. the area is tiled and each tile sends one many-to-many OSRM foot
+//      "table" request (sample points x the stations they could use), at
+//      most MAX_REQUESTS of them, 4 in flight, stopping at a time deadline;
+//      the results become per-station detour ratios;
 //   4. every vertex near a sampled station uses the measured time if it was
 //      sampled, otherwise the crow-fly estimate scaled by the ratio of the
 //      nearest sample for that station.
@@ -359,7 +361,10 @@ function timesViaStations(mesh, stations, best, access = crowAccess) {
 const FOOT_TABLE = 'https://routing.openstreetmap.de/routed-foot/table/v1/foot';
 const WALK_RANGE = 1500; // crow-fly metres considered "walkable" to a station
 const MAX_COORDS = 100; // per OSRM table request
-const MAX_REQUESTS = 40;
+const MAX_REQUESTS = 12;
+const MAX_TARGETS = 30; // stations per request; the rest of the slots are sample points
+const CONCURRENCY = 4;
+const DEADLINE_MS = 10000; // stop issuing requests after this; unsampled pairs are interpolated
 const crowWalk = (d) => (d * 1.25) / 75;
 const feeder = (d) => (d * 1.25 > 1500 ? stationAccess(d) : Infinity);
 
@@ -406,7 +411,7 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
   const bestOf = (k) => (k === DEST ? 0 : best[k]);
 
   // Stations in walking range of each vertex in the envelope band.
-  const pairs = new Map(); // station -> vertex ids
+  const vcands = new Map(); // vertex id -> candidate stations
   const grid = new Map();
   stations.forEach((s, k) => {
     const key = `${Math.floor(s.x / WALK_RANGE)},${Math.floor(s.y / WALK_RANGE)}`;
@@ -432,38 +437,42 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
       if (d > WALK_RANGE) continue;
       // Only stations that could plausibly be this vertex's best choice.
       if (crowWalk(d) + bestOf(k) > first[v] + 10) continue;
-      if (!pairs.has(k)) pairs.set(k, []);
-      pairs.get(k).push(v);
+      if (!vcands.has(v)) vcands.set(v, []);
+      vcands.get(v).push(k);
     }
   }
-  if (!pairs.size) return { times: first, refined: 0 };
+  if (!vcands.size) return { times: first, refined: 0 };
 
-  // Thin samples per station so everything fits in MAX_REQUESTS requests.
-  const stationIds = [...pairs.keys()];
-  let total = 0;
-  for (const k of stationIds) total += pairs.get(k).length + 1;
-  const keepFrac = Math.min(1, (MAX_REQUESTS * MAX_COORDS) / total);
-  for (const k of stationIds) {
-    const vs = pairs.get(k);
-    const n = Math.max(3, Math.min(MAX_COORDS - 1, Math.round(vs.length * keepFrac)));
-    if (vs.length > n) pairs.set(k, Array.from({ length: n }, (_, i) => vs[Math.floor((i * vs.length) / n)]));
+  // Batch spatially: split the area into square tiles and send one
+  // many-to-many request per tile (its sample points x the stations they
+  // could use). Each request then returns up to ~2,000 useful pairs instead
+  // of ~100. Tiles grow until there are at most MAX_REQUESTS of them.
+  let tile = 2000;
+  let tiles;
+  for (;;) {
+    tiles = new Map();
+    for (const v of vcands.keys()) {
+      const key = `${Math.floor(mesh.x[v] / tile)},${Math.floor(mesh.y[v] / tile)}`;
+      if (!tiles.has(key)) tiles.set(key, []);
+      tiles.get(key).push(v);
+    }
+    if (tiles.size <= MAX_REQUESTS) break;
+    tile *= 1.3;
   }
-
-  // Pack stations (targets) and their vertices (sources) into requests.
   const batches = [];
-  let cur = { targets: [], sources: new Set() };
-  for (const k of stationIds) {
-    const vs = pairs.get(k);
-    const extra = 1 + vs.filter((v) => !cur.sources.has(v)).length;
-    if (cur.targets.length && cur.targets.length + cur.sources.size + extra > MAX_COORDS) {
-      batches.push(cur);
-      cur = { targets: [], sources: new Set() };
-    }
-    cur.targets.push(k);
-    vs.forEach((v) => cur.sources.add(v));
+  for (const verts of tiles.values()) {
+    // The stations most of this tile's points could use.
+    const count = new Map();
+    for (const v of verts) for (const k of vcands.get(v)) count.set(k, (count.get(k) || 0) + 1);
+    const targets = [...count.keys()].sort((p, q) => count.get(q) - count.get(p)).slice(0, MAX_TARGETS);
+    const chosen = new Set(targets);
+    const usable = verts.filter((v) => vcands.get(v).some((k) => chosen.has(k)));
+    const n = Math.min(usable.length, MAX_COORDS - targets.length);
+    const sources = Array.from({ length: n }, (_, i) => usable[Math.floor((i * usable.length) / n)]);
+    if (sources.length && targets.length) batches.push({ targets, sources });
   }
-  if (cur.targets.length) batches.push(cur);
-  batches.length = Math.min(batches.length, MAX_REQUESTS);
+  // Nearest the destination first: those matter most if we run out of time.
+  batches.sort((p, q) => Math.hypot(mesh.x[p.sources[0]], mesh.y[p.sources[0]]) - Math.hypot(mesh.x[q.sources[0]], mesh.y[q.sources[0]]));
 
   // samples[k] = list of { x, y, ratio } measured around station k
   const samples = new Map();
@@ -471,15 +480,25 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
   const ll = (x, y) => fromLocal(dest, x, y);
   let done = 0;
   const queue = batches.slice();
+  const deadline = performance.now() + DEADLINE_MS;
   const worker = async () => {
-    while (queue.length) {
+    while (queue.length && performance.now() < deadline) {
       const b = queue.shift();
-      const src = [...b.sources];
-      const m = await footMatrix(
-        src.map((v) => ll(mesh.x[v], mesh.y[v])),
-        b.targets.map((k) => (k === DEST ? dest : ll(pos(k).x, pos(k).y))),
-        signal,
-      );
+      const src = b.sources;
+      let m;
+      try {
+        m = await footMatrix(
+          src.map((v) => ll(mesh.x[v], mesh.y[v])),
+          b.targets.map((k) => (k === DEST ? dest : ll(pos(k).x, pos(k).y))),
+          signal,
+        );
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        console.warn('Walking-route batch failed:', err);
+        continue; // other batches still help; gaps are interpolated
+      } finally {
+        onStatus?.(`Walking routes to stations… ${Math.round((100 * ++done) / batches.length)}%`);
+      }
       src.forEach((v, i) =>
         b.targets.forEach((k, j) => {
           const w = m[i][j];
@@ -492,10 +511,9 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
           samples.get(k).push({ x: mesh.x[v], y: mesh.y[v], ratio: w / Math.max(0.5, crowWalk(d)) });
         }),
       );
-      onStatus?.(`Walking routes to stations… ${Math.round((100 * ++done) / batches.length)}%`);
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
   const access = (v, k, d) => {
     if (k === -1) k = DEST;
