@@ -1,9 +1,9 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=27';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=27';
-import { buildBasemap, detailLayout } from './basemap.js?v=27';
-import { THEMES } from './vectormap.js?v=27';
-import { WarpRenderer } from './renderer.js?v=27';
-import { fromLocal, worldPx } from './geo.js?v=27';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=28';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=28';
+import { buildBasemap, detailLayout } from './basemap.js?v=28';
+import { THEMES } from './vectormap.js?v=28';
+import { WarpRenderer, LIMIT_SLACK } from './renderer.js?v=28';
+import { fromLocal, worldPx } from './geo.js?v=28';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -57,8 +57,10 @@ renderer &&
   (renderer.overlayDraw = (ctx, r) => {
     if (!data?.ready || !warps) return;
     const pos = currentPositions();
-    if (data.stations) drawStations(ctx, r, pos);
-    drawIslandRings(ctx, r, pos); // rings above station dots
+    if (data.stations) {
+      drawSubMeshEnvelopes(ctx, r, pos);
+      drawStations(ctx, r, pos);
+    }
   });
 
 function drawStations(ctx, r, pos) {
@@ -91,79 +93,42 @@ function drawStations(ctx, r, pos) {
   }
 }
 
-// Small "islands" inside the budget that aren't connected to the main
-// reachable area (e.g. around a station) can be too small for the shader's
-// budget line to show. Find them as connected components of the mesh and
-// circle each one.
-const islandCache = { key: null, comps: [] };
+// Some stations are inside the budget, but their walkable catchment (the
+// minutes left over, walked) is smaller than the mesh's resolution, so the
+// shader never sees time dip under the limit there. For those, draw the
+// missing piece of envelope directly: a walking-reach circle around the
+// station in the same red line (and a light tint), warped with the map.
+const WALK_M_PER_MIN = 60; // street distance ~1.25x crow-fly at 75 m/min
 
-function meshAdjacency(mesh) {
-  if (mesh.adj) return mesh.adj;
-  const adj = Array.from({ length: mesh.count }, () => []);
-  const I = mesh.indices;
-  for (let n = 0; n < I.length; n += 3) {
-    const a = I[n], b = I[n + 1], c = I[n + 2];
-    adj[a].push(b, c);
-    adj[b].push(a, c);
-    adj[c].push(a, b);
-  }
-  return (mesh.adj = adj);
-}
-
-function islands() {
-  const times = renderer._lastTimes || data.times;
-  if (islandCache.times === times && islandCache.budget === state.budget && islandCache.mesh === data.mesh) return islandCache.comps;
-  const mesh = data.mesh;
-  const adj = meshAdjacency(mesh);
-  const comp = new Int32Array(mesh.count).fill(-1);
-  const comps = [];
-  for (let v = 0; v < mesh.count; v++) {
-    if (comp[v] !== -1 || !(times[v] <= state.budget)) continue;
-    const id = comps.length;
-    const members = [v];
-    comp[v] = id;
-    for (let i = 0; i < members.length; i++) {
-      for (const w of adj[members[i]]) {
-        if (comp[w] === -1 && times[w] <= state.budget) {
-          comp[w] = id;
-          members.push(w);
-        }
-      }
-    }
-    comps.push(members);
-  }
-  const main = comp[0]; // the destination's own reachable area
-  Object.assign(islandCache, { times, budget: state.budget, mesh, comps: comps.filter((_, i) => i !== main) });
-  return islandCache.comps;
-}
-
-function drawIslandRings(ctx, r, pos) {
-  const comps = islands();
-  if (!comps.length) return;
+function drawSubMeshEnvelopes(ctx, r, pos) {
+  if (!data.subMesh?.length) return;
   ctx.save();
   ctx.setLineDash([]);
-  for (const members of comps) {
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const v of members) {
-      const [sx, sy] = r.toScreen(pos[2 * v], pos[2 * v + 1]);
-      minX = Math.min(minX, sx); maxX = Math.max(maxX, sx);
-      minY = Math.min(minY, sy); maxY = Math.max(maxY, sy);
-    }
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    const rad = Math.max(8, Math.hypot(maxX - minX, maxY - minY) / 2 + 6);
+  for (const { st } of data.subMesh) {
+    const reachM = Math.max(30, (limit() - st.best) * WALK_M_PER_MIN);
+    const c = forward(data.mesh, pos, st.x, st.y);
+    const e = forward(data.mesh, pos, st.x + reachM, st.y);
+    const n = forward(data.mesh, pos, st.x, st.y + reachM);
+    if (!c || !e || !n) continue;
+    const [cx, cy] = r.toScreen(c[0], c[1]);
+    const [ex, ey] = r.toScreen(e[0], e[1]);
+    const [nx, ny] = r.toScreen(n[0], n[1]);
+    // at least 6 px so a station that is only just inside stays noticeable
+    const rad = Math.max(6, (Math.hypot(ex - cx, ey - cy) + Math.hypot(nx - cx, ny - cy)) / 2);
     if (cx + rad < 0 || cy + rad < 0 || cx - rad > r.width || cy - rad > r.height) continue;
     ctx.beginPath();
     ctx.arc(cx, cy, rad, 0, Math.PI * 2);
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-    ctx.stroke();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#de2654';
+    ctx.fillStyle = 'rgba(255, 158, 31, 0.22)'; // the shader's near-limit amber tint
+    ctx.fill();
+    ctx.lineWidth = 2.2;
+    ctx.strokeStyle = 'rgba(222, 38, 84, 0.95)'; // the shader's budget-line red
     ctx.stroke();
   }
   ctx.restore();
 }
+
+// The inside/outside threshold used everywhere (see LIMIT_SLACK).
+const limit = () => state.budget + LIMIT_SLACK;
 
 let posCache = null;
 function currentPositions() {
@@ -467,7 +432,15 @@ function showResult(times) {
 function computeStationReach() {
   if (!data?.stations || !warps) return;
   const times = renderer._lastTimes || data.times;
-  data.stationIn = data.stations.map((st) => (locate(data.mesh, warps.orig, times, st.x, st.y)?.time ?? Infinity) <= state.budget);
+  data.stationIn = data.stations.map((st) => {
+    const meshTime = locate(data.mesh, warps.orig, times, st.x, st.y)?.time ?? Infinity;
+    return Math.min(meshTime, st.best ?? Infinity) <= limit();
+  });
+  // Stations whose own time is inside the budget but whose walkable
+  // catchment is smaller than the mesh can resolve (mesh time there is over).
+  data.subMesh = data.stations
+    .map((st, i) => ({ st, i, meshTime: locate(data.mesh, warps.orig, times, st.x, st.y)?.time ?? Infinity }))
+    .filter(({ st, meshTime }) => Number.isFinite(st.best) && st.best <= limit() && meshTime > limit());
 }
 
 function rewarp() {
@@ -931,7 +904,7 @@ function hover(e) {
   }
   const km = Math.hypot(hit.x, hit.y) / 1000;
   const t = Math.round(hit.time);
-  tip.innerHTML = `<b>${t < 1 ? '< 1 min' : formatMinutes(t)}</b> ${MODES[state.mode].icon}<br><span>${km < 1 ? Math.round(km * 1000) + ' m' : (km < 100 ? km.toFixed(1) : Math.round(km)) + ' km'} away${hit.time > state.budget ? ' · over budget' : ''}</span>`;
+  tip.innerHTML = `<b>${t < 1 ? '< 1 min' : formatMinutes(t)}</b> ${MODES[state.mode].icon}<br><span>${km < 1 ? Math.round(km * 1000) + ' m' : (km < 100 ? km.toFixed(1) : Math.round(km)) + ' km'} away${hit.time > limit() ? ' · over budget' : ''}</span>`;
   tip.hidden = false;
   tip.style.left = `${px + 14}px`;
   tip.style.top = `${py + 14}px`;

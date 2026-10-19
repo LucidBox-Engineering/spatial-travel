@@ -1,8 +1,8 @@
 // Stitches raster map tiles around the destination into one square canvas
 // that the WebGL renderer uses as a texture.
 
-import { worldPx, EARTH_CIRC } from './geo.js?v=27';
-import { buildVectorBasemap, THEMES } from './vectormap.js?v=27';
+import { worldPx, EARTH_CIRC } from './geo.js?v=28';
+import { buildVectorBasemap, THEMES } from './vectormap.js?v=28';
 
 // OpenStreetMap's standard tiles: free, no API key, CORS-enabled. To stay
 // within the OSM tile usage policy we fetch a modest number of 256px tiles

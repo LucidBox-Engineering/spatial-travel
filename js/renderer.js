@@ -1,5 +1,9 @@
 // WebGL2 renderer for the warped map plus a 2D overlay for rings & markers.
 
+// Times within this many minutes over the budget still count as inside (they
+// round to the budget in the readout).
+export const LIMIT_SLACK = 0.5;
+
 const VS = `#version 300 es
 in vec2 a_orig;
 in vec2 a_dist;
@@ -30,6 +34,7 @@ uniform sampler2D u_tex;
 uniform sampler2D u_detail; // sharper re-render of the zoomed-in area
 uniform vec4 u_detailRect;  // its extent in base uv (u0, v0, u1, v1); u1 <= u0 = none
 uniform float u_budget;
+uniform float u_limit;
 uniform float u_shade;
 uniform vec2 u_style; // x: tint strength inside budget, y: how much to lighten the greyscale beyond
 out vec4 outColor;
@@ -39,7 +44,9 @@ void main() {
   if (u_detailRect.z > u_detailRect.x && all(greaterThanEqual(duv, vec2(0.0))) && all(lessThanEqual(duv, vec2(1.0)))) {
     base = texture(u_detail, duv).rgb;
   }
-  float t = v_time / u_budget;
+  // "Within budget" means the time rounds to <= the budget (u_limit =
+  // budget + 0.5 min), matching the minutes shown in the tooltip.
+  float t = v_time / u_limit;
 
   // Beyond the budget: fully greyscale (map, styles and transit lines alike),
   // lightened a little. The switch is about one pixel wide - right under the
@@ -58,11 +65,11 @@ void main() {
   float q = v_time / (u_budget * 0.25);
   float wq = max(fwidth(q), 1e-4);
   float dq = abs(fract(q + 0.5) - 0.5) / wq;
-  float minor = (1.0 - smoothstep(0.4, 1.3, dq)) * step(q, 8.5);
+  float minor = (1.0 - smoothstep(0.4, 1.3, dq)) * step(q, 8.5) * step(0.5, abs(q - 4.0)); // q=4 is the budget line
   col = mix(col, vec3(0.16, 0.20, 0.27), minor * 0.35 * u_shade);
 
   float wt = max(fwidth(v_time), 1e-4);
-  float dt = abs(v_time - u_budget) / wt;
+  float dt = abs(v_time - u_limit) / wt;
   float major = 1.0 - smoothstep(1.0, 2.4, dt);
   col = mix(col, vec3(0.87, 0.15, 0.33), major * 0.95 * u_shade);
 
@@ -93,7 +100,7 @@ export class WarpRenderer {
     this.prog = prog;
     this.loc = {};
     for (const a of ['a_orig', 'a_dist', 'a_size', 'a_uv', 'a_time']) this.loc[a] = gl.getAttribLocation(prog, a);
-    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_shade', 'u_style', 'u_detail', 'u_detailRect'])
+    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_limit', 'u_shade', 'u_style', 'u_detail', 'u_detailRect'])
       this.loc[u] = gl.getUniformLocation(prog, u);
     this.vao = gl.createVertexArray();
     this.buffers = {};
@@ -218,6 +225,7 @@ export class WarpRenderer {
       gl.uniform1f(this.loc.u_strength, s.strength);
       gl.uniform1f(this.loc.u_blend, s.blend);
       gl.uniform1f(this.loc.u_budget, s.budget);
+      gl.uniform1f(this.loc.u_limit, s.budget + LIMIT_SLACK);
       gl.uniform1f(this.loc.u_shade, s.shade);
       gl.uniform2f(this.loc.u_style, s.tint, s.wash);
       gl.drawElements(gl.TRIANGLES, this.mesh.indices.length, gl.UNSIGNED_SHORT, 0);

@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=27';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=27';
-import { cached, DAY } from './cache.js?v=27';
+import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=28';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=28';
+import { cached, DAY } from './cache.js?v=28';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -860,7 +860,7 @@ async function trainTimesOsm(dest, mesh, signal, onStatus, budget) {
     const best = stationTimes(net, (s, k) => egress.get(k) ?? stationAccess(Math.hypot(s.x, s.y)));
     const idx = [];
     for (let k = 0; k < net.stations.length; k++) if (Number.isFinite(best[k])) idx.push(k);
-    const stations = idx.map((k) => net.stations[k]);
+    const stations = idx.map((k) => ({ ...net.stations[k], best: best[k] }));
     const bestList = idx.map((k) => best[k]);
 
     let times;
