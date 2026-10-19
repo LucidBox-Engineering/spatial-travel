@@ -1,9 +1,9 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson, UNREACHABLE } from './travel.js?v=32';
-import { createMesh, computeWarps, blendPositions, locate, forward, sampleTime } from './warp.js?v=32';
-import { buildBasemap, detailLayout } from './basemap.js?v=32';
-import { THEMES } from './vectormap.js?v=32';
-import { WarpRenderer, LIMIT_SLACK } from './renderer.js?v=32';
-import { fromLocal, worldPx } from './geo.js?v=32';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson, UNREACHABLE } from './travel.js?v=33';
+import { createMesh, computeWarps, blendPositions, locate, forward, sampleTime } from './warp.js?v=33';
+import { buildBasemap, detailLayout } from './basemap.js?v=33';
+import { THEMES } from './vectormap.js?v=33';
+import { WarpRenderer, LIMIT_SLACK } from './renderer.js?v=33';
+import { fromLocal, worldPx } from './geo.js?v=33';
 
 const $ = (sel) => document.querySelector(sel);
 

@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=32';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=32';
-import { cached, DAY } from './cache.js?v=32';
+import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=33';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=33';
+import { cached, DAY } from './cache.js?v=33';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -701,6 +701,8 @@ async function fetchRoutes(dest, b, signal) {
   return fetchJson(`${TRANSITOUS}/api/experimental/map/routes?${q}`, signal, 30000);
 }
 
+const MAX_HOP = 1500; // metres
+
 // Rail/tram route shapes around the reachable stops, for drawing the lines
 // (MOTIS "experimental/map/routes"; optional - failures just mean no lines).
 // Returns { lines: [{ pts, routes: [key] }], legend: [{ key, name, colour }] }.
@@ -729,14 +731,30 @@ async function transitousLines(dest, stops, signal) {
   };
   const lines = [];
   for (const pl of json.polylines || []) {
-    const rail = (pl.routeIndexes || []).map((i) => routes[i]).filter((r) => r && RAIL_MODES.has(r.mode));
+    // Routes without real geometry (pathSource NONE) are drawn by MOTIS as
+    // straight stop-to-stop lines - across water, through buildings. Skip
+    // them; their stations still show.
+    const rail = (pl.routeIndexes || [])
+      .map((i) => routes[i])
+      .filter((r) => r && RAIL_MODES.has(r.mode) && r.pathSource !== 'NONE');
     if (!rail.length || !pl.polyline?.points) continue;
     const keys = [...new Set(rail.map(keyOf))];
     const pts = decodePolyline(pl.polyline.points, pl.polyline.precision).map(([la, ln]) => {
       const [x, y] = toLocal(dest, la, ln);
       return { x, y };
     });
-    lines.push({ pts, routes: keys });
+    // Belt and braces: real track shapes have points every few hundred
+    // metres at most, so break the line at any single straight hop longer
+    // than MAX_HOP (a stop-to-stop shortcut) and drop that hop.
+    let run = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      if (Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y) > MAX_HOP) {
+        if (run.length > 1) lines.push({ pts: run, routes: keys });
+        run = [];
+      }
+      run.push(pts[i]);
+    }
+    if (run.length > 1) lines.push({ pts: run, routes: keys });
   }
   // Use GTFS colours when every line has one and they're all different;
   // otherwise assign palette colours so lines can be told apart.
