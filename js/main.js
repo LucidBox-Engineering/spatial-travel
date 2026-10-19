@@ -1,9 +1,9 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=25';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=25';
-import { buildBasemap, detailLayout } from './basemap.js?v=25';
-import { THEMES } from './vectormap.js?v=25';
-import { WarpRenderer } from './renderer.js?v=25';
-import { fromLocal } from './geo.js?v=25';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=27';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=27';
+import { buildBasemap, detailLayout } from './basemap.js?v=27';
+import { THEMES } from './vectormap.js?v=27';
+import { WarpRenderer } from './renderer.js?v=27';
+import { fromLocal, worldPx } from './geo.js?v=27';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -57,9 +57,12 @@ renderer &&
   (renderer.overlayDraw = (ctx, r) => {
     if (!data?.ready || !warps) return;
     const pos = currentPositions();
-    drawIslandRings(ctx, r, pos);
-    if (!data.stations) return;
-    // Project each station once per frame; lines reuse the projections.
+    if (data.stations) drawStations(ctx, r, pos);
+    drawIslandRings(ctx, r, pos); // rings above station dots
+  });
+
+function drawStations(ctx, r, pos) {
+  {
     const proj = new Map();
     const project = (s) => {
       if (!proj.has(s)) {
@@ -69,66 +72,24 @@ renderer &&
       return proj.get(s);
     };
     ctx.save();
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    // Lines: each shape may be shared by several named lines; draw them side
-    // by side (offset along the screen-space normal) in their own colours.
-    const W = 2.6;
-    for (const line of data.lines || []) {
-      const colours = line.colours || [line.colour || (line.metro ? '#2457c5' : '#1f2a37')];
-      const runs = [];
-      let run = [];
-      for (const s of line.pts) {
-        const q = project(s);
-        if (!q) {
-          if (run.length > 1) runs.push(run);
-          run = [];
-          continue;
-        }
-        run.push(q);
-      }
-      if (run.length > 1) runs.push(run);
-      ctx.lineWidth = W;
-      ctx.globalAlpha = 0.85;
-      for (const pts of runs) {
-        const normals = pts.map((p, i) => {
-          const a = pts[Math.max(0, i - 1)];
-          const b = pts[Math.min(pts.length - 1, i + 1)];
-          const dx = b[0] - a[0];
-          const dy = b[1] - a[1];
-          const len = Math.hypot(dx, dy) || 1;
-          return [-dy / len, dx / len];
-        });
-        colours.forEach((c, k) => {
-          const off = (k - (colours.length - 1) / 2) * W;
-          ctx.beginPath();
-          pts.forEach((p, i) => {
-            const x = p[0] + normals[i][0] * off;
-            const y = p[1] + normals[i][1] * off;
-            if (i) ctx.lineTo(x, y);
-            else ctx.moveTo(x, y);
-          });
-          ctx.strokeStyle = c;
-          ctx.stroke();
-        });
-      }
-    }
-    ctx.globalAlpha = 1;
-    for (const s of data.stations) {
+    ctx.globalAlpha = 0.85;
+    data.stations.forEach((s, i) => {
       const q = project(s);
-      if (!q) continue;
+      if (!q) return;
       const [sx, sy] = q;
-      if (sx < -10 || sy < -10 || sx > r.width + 10 || sy > r.height + 10) continue;
+      if (sx < -10 || sy < -10 || sx > r.width + 10 || sy > r.height + 10) return;
       ctx.beginPath();
       ctx.arc(sx, sy, s.lines > 1 ? 3.6 : s.metro ? 2.6 : 3.2, 0, Math.PI * 2);
-      ctx.fillStyle = s.metro ? '#2457c5' : '#1f2a37';
+      // Stations outside the budget are greyed like the map around them.
+      ctx.fillStyle = data.stationIn && !data.stationIn[i] ? '#9a9a9a' : s.metro ? '#2457c5' : '#1f2a37';
       ctx.fill();
       ctx.lineWidth = 1;
       ctx.strokeStyle = '#fff';
       ctx.stroke();
-    }
+    });
     ctx.restore();
-  });
+  }
+}
 
 // Small "islands" inside the budget that aren't connected to the main
 // reachable area (e.g. around a station) can be too small for the shader's
@@ -363,14 +324,14 @@ function getBasemap(dest, radius) {
     setTimeout(() => {
       pending = false;
       if (data?.basemap === bm) {
-        renderer.setTexture(bm.canvas);
+        uploadBase(bm);
         anim.dirty = true;
       }
     }, 250);
   }, undefined, state.theme);
   bm.done.then((info) => {
     if (data?.basemap === bm) {
-      renderer.setTexture(bm.canvas);
+      uploadBase(bm);
       anim.dirty = true;
     }
     $('#tiles-src').textContent = info.loaded ? info.source + (state.theme === 'osm' ? '' : ' · © OpenMapTiles') : 'unavailable (offline)';
@@ -413,7 +374,7 @@ async function reload() {
   data = { key, mesh, basemap, uvs, times, source: 'Loading…', stations: null, lines: null, bucket };
   renderer.setMesh(mesh, uvs);
   clearDetail();
-  renderer.setTexture(basemap.canvas);
+  uploadBase(basemap);
   renderer.setTimes(times);
   renderer._lastTimes = times;
   warps = computeWarps(mesh, times, state.budget);
@@ -446,6 +407,7 @@ async function reload() {
     if (token !== loadToken || data !== myData) return;
     data.stations = res.stations || null;
     data.lines = res.lines || null;
+    refreshLineTextures();
     renderLineLegend(res.legend || null);
     showResult(res.times);
     const est = /estimate/i.test(res.source);
@@ -496,8 +458,16 @@ function showResult(times) {
   warps = computeWarps(data.mesh, times, state.budget);
   renderer.setWarps(warps);
   updateLeafletReach();
+  computeStationReach();
   tween(renderer.state, 'shade', 1, 500);
   applyView();
+}
+
+// Which stations lie inside the budget (for greying the others).
+function computeStationReach() {
+  if (!data?.stations || !warps) return;
+  const times = renderer._lastTimes || data.times;
+  data.stationIn = data.stations.map((st) => (locate(data.mesh, warps.orig, times, st.x, st.y)?.time ?? Infinity) <= state.budget);
 }
 
 function rewarp() {
@@ -505,7 +475,10 @@ function rewarp() {
   warps = computeWarps(data.mesh, data.times, state.budget);
   renderer.setWarps(warps);
   renderer.state.budget = state.budget;
-  if (data.ready) updateLeafletReach();
+  if (data.ready) {
+    updateLeafletReach();
+    computeStationReach();
+  }
   anim.dirty = true;
 }
 
@@ -600,8 +573,75 @@ function applyThemeShading() {
   if (!renderer) return;
   const poster = state.theme !== 'osm';
   renderer.state.tint = poster ? 0.1 : 0.2;
-  renderer.state.wash = poster ? 0.55 : 0.9;
+  renderer.state.wash = poster ? 0.25 : 0.35; // lightening of the greyscale beyond the budget
   anim.dirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// Transit lines are painted into the map texture itself (on a copy of the
+// basemap), so they sit just above the map and below the time tint,
+// contours, budget line and markers - and warp with the map.
+
+const LINE_ALPHA = 0.55;
+const LINE_PX = 2.4; // per line, in texture pixels
+
+function withLines(src, layout, holder) {
+  const lines = data?.lines;
+  if (!lines?.length || !state.dest) return src;
+  holder.composite ||= document.createElement('canvas');
+  const c = holder.composite;
+  if (c.width !== src.width) c.width = c.height = src.width;
+  const ctx = c.getContext('2d');
+  ctx.globalAlpha = 1;
+  ctx.drawImage(src, 0, 0);
+  const toPx = (p) => {
+    p.ll ||= fromLocal(state.dest, p.x, p.y);
+    const [wx, wy] = worldPx(p.ll.lat, p.ll.lng, layout.z, 256);
+    return [wx - layout.ox, wy - layout.oy];
+  };
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = LINE_PX;
+  ctx.globalAlpha = LINE_ALPHA;
+  for (const line of lines) {
+    const colours = line.colours || [line.colour || (line.metro ? '#2457c5' : '#1f2a37')];
+    const pts = line.pts.map(toPx);
+    if (pts.length < 2) continue;
+    // Several lines on one shape: side by side along the normal.
+    const normals = pts.map((p, i) => {
+      const a = pts[Math.max(0, i - 1)];
+      const b = pts[Math.min(pts.length - 1, i + 1)];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      return [-(b[1] - a[1]) / len, (b[0] - a[0]) / len];
+    });
+    colours.forEach((col, k) => {
+      const off = (k - (colours.length - 1) / 2) * LINE_PX;
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const x = p[0] + normals[i][0] * off;
+        const y = p[1] + normals[i][1] * off;
+        if (i) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = col;
+      ctx.stroke();
+    });
+  }
+  ctx.globalAlpha = 1;
+  return c;
+}
+
+const baseHolder = {};
+function uploadBase(bm) {
+  renderer.setTexture(withLines(bm.canvas, bm, baseHolder));
+  anim.dirty = true;
+}
+
+// Lines changed (new results): repaint both textures.
+function refreshLineTextures() {
+  if (!data?.basemap) return;
+  uploadBase(data.basemap);
+  if (detail.layout && detail.bm) renderer.setDetail(withLines(detail.bm.canvas, detail.layout, detail), detail.layout.rect);
 }
 
 // ---------------------------------------------------------------------------
@@ -656,11 +696,11 @@ function requestDetail() {
   detail.ctrl?.abort();
   const ctrl = new AbortController();
   const layout = detailLayout(basemap, [cu - span / 2, cv - span / 2, cu + span / 2, cv + span / 2]);
-  Object.assign(detail, { ctrl, layout });
+  Object.assign(detail, { ctrl, layout, bm: null });
   let pending = false;
   const upload = () => {
     if (detail.ctrl !== ctrl) return;
-    renderer.setDetail(bm.canvas, layout.rect);
+    renderer.setDetail(withLines(bm.canvas, layout, detail), layout.rect);
     anim.dirty = true;
   };
   const bm = buildBasemap(null, null, renderer.maxTex, () => {
@@ -671,6 +711,7 @@ function requestDetail() {
       upload();
     }, 250);
   }, ctrl.signal, state.theme, layout);
+  detail.bm = bm;
   bm.done.then(upload);
 }
 
@@ -685,7 +726,7 @@ document.querySelectorAll('[data-theme]').forEach((b) =>
     clearDetail();
     const bm = getBasemap(state.dest, data.mesh.radius);
     data.basemap = bm;
-    renderer.setTexture(bm.canvas);
+    uploadBase(bm);
     anim.dirty = true;
   }),
 );

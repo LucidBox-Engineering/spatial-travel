@@ -31,7 +31,7 @@ uniform sampler2D u_detail; // sharper re-render of the zoomed-in area
 uniform vec4 u_detailRect;  // its extent in base uv (u0, v0, u1, v1); u1 <= u0 = none
 uniform float u_budget;
 uniform float u_shade;
-uniform vec2 u_style; // x: tint strength inside budget, y: wash strength beyond
+uniform vec2 u_style; // x: tint strength inside budget, y: how much to lighten the greyscale beyond
 out vec4 outColor;
 void main() {
   vec3 base = texture(u_tex, v_uv).rgb;
@@ -41,11 +41,14 @@ void main() {
   }
   float t = v_time / u_budget;
 
-  // Beyond the budget: desaturate and wash out.
-  float beyond = smoothstep(1.0, 1.06, t) * u_shade;
+  // Beyond the budget: fully greyscale (map, styles and transit lines alike),
+  // lightened a little. The switch is about one pixel wide - right under the
+  // red budget line - so no coloured fringe is left outside the envelope.
+  float edge = max(fwidth(t), 1e-4);
+  float beyond = smoothstep(1.0 - edge, 1.0 + edge, t) * u_shade;
   float g = dot(base, vec3(0.299, 0.587, 0.114));
-  vec3 washed = mix(vec3(g), vec3(0.80, 0.81, 0.84), 0.45);
-  vec3 col = mix(base, washed, beyond * u_style.y);
+  vec3 washed = mix(vec3(g), vec3(0.93), u_style.y);
+  vec3 col = mix(base, washed, beyond);
 
   // Within budget: tint from teal (close) to amber (at the limit).
   vec3 ramp = mix(vec3(0.0, 0.62, 0.58), vec3(1.0, 0.62, 0.12), clamp(t, 0.0, 1.0));
@@ -102,7 +105,7 @@ export class WarpRenderer {
     this.anisoExt = gl.getExtension('EXT_texture_filter_anisotropic');
     if (this.anisoExt) this.maxAniso = gl.getParameter(this.anisoExt.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
 
-    this.state = { strength: 0, blend: 0, budget: 30, shade: 1, tint: 0.2, wash: 0.9, cx: 0, cy: 0, scale: 0.01 };
+    this.state = { strength: 0, blend: 0, budget: 30, shade: 1, tint: 0.2, wash: 0.35, cx: 0, cy: 0, scale: 0.01 };
     this.mesh = null;
     this.overlayDraw = null;
     this.resize();
@@ -196,7 +199,7 @@ export class WarpRenderer {
     const gl = this.gl;
     const s = this.state;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(0.957, 0.953, 0.937, 1);
+    gl.clearColor(0.95, 0.95, 0.95, 1); // neutral: outside the map is 'not reachable' too
     gl.clear(gl.COLOR_BUFFER_BIT);
     if (this.mesh && this.warps) {
       gl.useProgram(this.prog);

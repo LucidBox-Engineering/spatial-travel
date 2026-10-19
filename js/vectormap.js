@@ -9,7 +9,7 @@
 
 import Pbf from '../vendor/pbf/index.js';
 import { VectorTile } from '../vendor/vector-tile/index.js';
-import { cached, DAY } from './cache.js?v=25';
+import { cached, DAY } from './cache.js?v=27';
 
 export const THEMES = {
   peach: {
