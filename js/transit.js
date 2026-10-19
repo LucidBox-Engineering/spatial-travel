@@ -15,16 +15,17 @@
 // best time to the destination using only real lines and paying for waits and
 // transfers. Map points then add the time to reach a station.
 
-import { toLocal, bboxAround } from './geo.js?v=16';
-import { cached, DAY } from './cache.js?v=16';
+import { toLocal, bboxAround } from './geo.js?v=17';
+import { cached, DAY } from './cache.js?v=17';
 
-// Public Overpass instances, tried in order. overpass-api.de often answers
-// 502/504 under load (without CORS headers, so browsers report a CORS error).
+// Public Overpass instances, tried in order. overpass-api.de is the one that
+// reliably answers, but can be slow (~45 s seen for a city query) or shed
+// load with a quick 502 (no CORS headers, so browsers report a CORS error).
+// overpass.private.coffee and overpass.kumi.systems were dropped after
+// returning 500 for every query in testing.
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
 ];
 const PASSES = 2; // full rounds over the instance list
 const RETRY_PAUSE_MS = 4000;
@@ -327,7 +328,7 @@ export async function fetchNetwork(dest, radius, signal) {
   // light rail too.
   const regional = radius > 150000;
   const routes = regional ? 'train' : 'train|subway|light_rail|monorail';
-  const q = `[out:json][timeout:${regional ? 90 : 40}];
+  const q = `[out:json][timeout:${regional ? 180 : 90}];
 rel["type"="route"]["route"~"^(${routes})$"](${bbox})->.routes;
 .routes out body;
 node(r.routes);
@@ -336,7 +337,7 @@ out skel qt;`;
   // not cached.
   const key = `rail:${dest.lat.toFixed(4)},${dest.lng.toFixed(4)}:${Math.round(radius)}`;
   return cached(key, 7 * DAY, async () => {
-    const json = await overpass(q, signal, regional ? 100000 : 50000);
+    const json = await overpass(q, signal, regional ? 190000 : 100000);
     return json ? parseNetwork(json, dest) : null;
   });
 }

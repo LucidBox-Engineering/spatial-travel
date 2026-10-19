@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=16';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=16';
-import { cached, DAY } from './cache.js?v=16';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=17';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=17';
+import { cached, DAY } from './cache.js?v=17';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -300,10 +300,10 @@ async function fetchStations(dest, radius, signal) {
   // thinned to one per grid cell so the model stays fast.
   const regional = radius > 150000;
   const q = regional
-    ? `[out:json][timeout:60];(
+    ? `[out:json][timeout:110];(
     nwr["railway"="station"]["station"!~"^(subway|light_rail|monorail|funicular|tram|miniature)$"](${bbox});
   );out center tags;`
-    : `[out:json][timeout:25];(
+    : `[out:json][timeout:50];(
     nwr["railway"~"^(station|halt)$"](${bbox});
     nwr["public_transport"="station"]["train"="yes"](${bbox});
     nwr["station"~"^(subway|light_rail)$"](${bbox});
@@ -311,7 +311,7 @@ async function fetchStations(dest, radius, signal) {
   const cell = Math.max(150, radius / 70);
   const key = `stations:${dest.lat.toFixed(4)},${dest.lng.toFixed(4)}:${Math.round(radius)}`;
   return cached(key, 7 * DAY, async () => {
-    const json = await overpass(q, signal, regional ? 75000 : 30000);
+    const json = await overpass(q, signal, regional ? 120000 : 60000);
     if (!json) return null;
     const stations = [];
     const seen = new Set();
