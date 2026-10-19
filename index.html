@@ -6,9 +6,9 @@
     <title>Time Warp Map</title>
     <meta name="description" content="A map that warps by travel time: closer in time means closer in space, or bigger." />
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="style.css?v=15" />
+    <link rel="stylesheet" href="style.css?v=16" />
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script type="module" src="js/main.js?v=15"></script>
+    <script type="module" src="js/main.js?v=16"></script>
   </head>
   <body>
     <aside id="panel">
@@ -89,6 +89,7 @@
       <div id="loader" role="status" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
         <span id="loader-text">Loading…</span>
+        <button id="loader-retry" type="button" hidden>Retry</button>
         <span class="track" aria-hidden="true"><span id="loader-bar"></span></span>
       </div>
       <button id="pick-btn" type="button" hidden>📍 Change destination</button>

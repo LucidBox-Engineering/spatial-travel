@@ -15,8 +15,8 @@
 // best time to the destination using only real lines and paying for waits and
 // transfers. Map points then add the time to reach a station.
 
-import { toLocal, bboxAround } from './geo.js?v=15';
-import { cached, DAY } from './cache.js?v=15';
+import { toLocal, bboxAround } from './geo.js?v=16';
+import { cached, DAY } from './cache.js?v=16';
 
 // Public Overpass instances, tried in order. overpass-api.de often answers
 // 502/504 under load (without CORS headers, so browsers report a CORS error).
@@ -26,6 +26,8 @@ const OVERPASS = [
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ];
+const PASSES = 2; // full rounds over the instance list
+const RETRY_PAUSE_MS = 4000;
 const HEDGE_MS = 15000; // if an instance is this slow, also ask the next one (kept long: aborting doesn't stop the server's work)
 
 const MERGE_DIST = 300; // metres: stops closer than this form one station
@@ -34,11 +36,13 @@ const TRANSFER = 3; // minutes to change between lines at a station
 // POST an Overpass query. A failing instance falls through to the next one
 // immediately; a slow one gets "hedged" by also asking the next instance
 // after HEDGE_MS. The first good answer wins and the others are aborted.
-// Resolves to null if every instance fails.
+// If every instance fails, pause and go round once more; resolves to null if
+// that fails too.
 export function overpass(q, signal, timeoutMs) {
   return new Promise((resolve, reject) => {
     const ctrls = [];
     let next = 0;
+    let pass = 1;
     let pending = 0;
     let done = false;
     let hedge = null;
@@ -56,7 +60,17 @@ export function overpass(q, signal, timeoutMs) {
     const launch = () => {
       if (done) return;
       if (next >= OVERPASS.length) {
-        if (!pending) settle(resolve, null);
+        if (pending) return;
+        // Every instance failed. Public instances shed load with quick
+        // 5xx responses, so one more pass after a pause often succeeds.
+        if (pass < PASSES) {
+          pass++;
+          next = 0;
+          clearTimeout(hedge);
+          hedge = setTimeout(launch, RETRY_PAUSE_MS);
+          return;
+        }
+        settle(resolve, null);
         return;
       }
       const url = OVERPASS[next++];

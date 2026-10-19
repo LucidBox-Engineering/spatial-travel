@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=15';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=15';
-import { cached, DAY } from './cache.js?v=15';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=16';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=16';
+import { cached, DAY } from './cache.js?v=16';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -637,10 +637,8 @@ async function trainTimes(dest, mesh, signal, onStatus, budget) {
     };
   }
   // Every Overpass instance failed: don't queue another heavy query against
-  // the same busy servers, just use the estimate.
-  if (net === null) {
-    return { times: heuristicTimes('train', mesh), source: 'Rail data servers unavailable — estimate' };
-  }
+  // the same busy servers; report the failure so the UI can offer a retry.
+  if (net === null) return { failed: true, source: 'Rail data servers are busy' };
   // Area has no route data: fall back to station locations only.
   onStatus?.('Finding train stations…');
   const stations = await fetchStations(dest, mesh.radius * 1.15, signal);
@@ -666,9 +664,10 @@ export function heuristicTimes(mode, mesh) {
 }
 
 // Returns { times: Float32Array (per mesh vertex), source: string, stations?, lines? }
+// or { failed: true, source } when the data servers could not be reached.
 export async function computeTimes(dest, mode, mesh, signal, onStatus, budget = 60) {
   if (mode === 'train') return trainTimes(dest, mesh, signal, onStatus, budget);
   const res = await roadTimes(dest, mode, mesh, signal, onStatus);
   if (res) return res;
-  return { times: heuristicTimes(mode, mesh), source: 'Routing servers unreachable — estimate' };
+  return { failed: true, source: 'Routing servers are busy' };
 }

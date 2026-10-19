@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=15';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=15';
-import { buildBasemap } from './basemap.js?v=15';
-import { WarpRenderer } from './renderer.js?v=15';
-import { fromLocal } from './geo.js?v=15';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=16';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=16';
+import { buildBasemap } from './basemap.js?v=16';
+import { WarpRenderer } from './renderer.js?v=16';
+import { fromLocal } from './geo.js?v=16';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -187,16 +187,19 @@ function setStatus(text, kind = '') {
 
 // Loading indicator: a pill with spinner + message over the map, and
 // ripples expanding from the destination (drawn by the renderer).
-const loading = { times: null, tiles: null };
+const loading = { times: null, tiles: null, error: null };
 
 function updateLoader() {
-  const msg = loading.times || loading.tiles;
+  if (loading.times) loading.error = null; // a new load is under way
+  const msg = loading.error || loading.times || loading.tiles;
   const el = $('#loader');
   el.classList.toggle('show', !!msg);
+  el.classList.toggle('error', !!loading.error);
+  $('#loader-retry').hidden = !loading.error;
   if (msg) $('#loader-text').textContent = msg.replace(/…\s*\d+%$/, '…');
-  const pct = loading.times ? /(\d+)%$/.exec(loading.times)?.[1] : loading.tilesPct;
+  const pct = loading.error ? null : loading.times ? /(\d+)%$/.exec(loading.times)?.[1] : loading.tilesPct;
   $('#loader-bar').style.width = pct != null ? `${Math.max(4, pct)}%` : '';
-  $('#loader').classList.toggle('indeterminate', pct == null);
+  el.classList.toggle('indeterminate', pct == null && !loading.error);
   if (renderer) renderer.state.loading = !!loading.times;
   anim.dirty = true;
 }
@@ -325,6 +328,10 @@ async function reload() {
       if (token === loadToken) setStatus(msg, 'busy');
     }, bucket);
     if (token !== loadToken) return;
+    if (res.failed) {
+      showFailure(`${res.source}. Try again in a moment.`);
+      return;
+    }
     data.times = res.times;
     data.source = res.source;
     data.stations = res.stations || null;
@@ -336,10 +343,24 @@ async function reload() {
   } catch (err) {
     if (signal.aborted) return;
     console.error(err);
-    setStatus('Could not load travel times — showing estimate.', 'warn');
-    showResult(data.times);
+    showFailure('Could not load travel times.');
   }
 }
+
+// Data servers unreachable: keep the plain map (no made-up estimate) and
+// offer a retry in the loader pill.
+function showFailure(msg) {
+  data.source = 'unavailable';
+  updateSourceLine();
+  setStatus(msg, 'warn');
+  loading.error = msg;
+  updateLoader();
+}
+
+$('#loader-retry').addEventListener('click', () => {
+  data = null; // force a fresh fetch (failures are never cached)
+  reload();
+});
 
 // Real times are in: shade the map and warp it into the selected view.
 function showResult(times) {
