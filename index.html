@@ -6,9 +6,9 @@
     <title>Time Warp Map</title>
     <meta name="description" content="A map that warps by travel time: closer in time means closer in space, or bigger." />
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="style.css?v=19" />
+    <link rel="stylesheet" href="style.css?v=20" />
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script type="module" src="js/main.js?v=19"></script>
+    <script type="module" src="js/main.js?v=20"></script>
   </head>
   <body>
     <aside id="panel">
@@ -64,6 +64,7 @@
       <section class="legend">
         <div class="bar"></div>
         <div class="ticks"><span>0</span><span id="legend-max">30 min</span><span>beyond</span></div>
+        <div id="line-legend" hidden></div>
         <p class="small">Lines every quarter of your budget; the red line is your limit by <span id="legend-mode">drive</span>. Hover or tap the map to read times. Drag to pan; scroll, pinch or use the +/− buttons to zoom; ⟲ or double-tap resets.</p>
       </section>
 

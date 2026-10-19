@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=19';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=19';
-import { buildBasemap } from './basemap.js?v=19';
-import { WarpRenderer } from './renderer.js?v=19';
-import { fromLocal } from './geo.js?v=19';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=20';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=20';
+import { buildBasemap } from './basemap.js?v=20';
+import { WarpRenderer } from './renderer.js?v=20';
+import { fromLocal } from './geo.js?v=20';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -67,23 +67,47 @@ renderer &&
     ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
+    // Lines: each shape may be shared by several named lines; draw them side
+    // by side (offset along the screen-space normal) in their own colours.
+    const W = 2.6;
     for (const line of data.lines || []) {
-      ctx.beginPath();
-      let pen = false;
+      const colours = line.colours || [line.colour || (line.metro ? '#2457c5' : '#1f2a37')];
+      const runs = [];
+      let run = [];
       for (const s of line.pts) {
         const q = project(s);
         if (!q) {
-          pen = false;
+          if (run.length > 1) runs.push(run);
+          run = [];
           continue;
         }
-        if (pen) ctx.lineTo(q[0], q[1]);
-        else ctx.moveTo(q[0], q[1]);
-        pen = true;
+        run.push(q);
       }
-      ctx.lineWidth = line.metro ? 2 : 2.5;
-      ctx.strokeStyle = line.colour || (line.metro ? '#2457c5' : '#1f2a37');
-      ctx.globalAlpha = 0.55;
-      ctx.stroke();
+      if (run.length > 1) runs.push(run);
+      ctx.lineWidth = W;
+      ctx.globalAlpha = 0.85;
+      for (const pts of runs) {
+        const normals = pts.map((p, i) => {
+          const a = pts[Math.max(0, i - 1)];
+          const b = pts[Math.min(pts.length - 1, i + 1)];
+          const dx = b[0] - a[0];
+          const dy = b[1] - a[1];
+          const len = Math.hypot(dx, dy) || 1;
+          return [-dy / len, dx / len];
+        });
+        colours.forEach((c, k) => {
+          const off = (k - (colours.length - 1) / 2) * W;
+          ctx.beginPath();
+          pts.forEach((p, i) => {
+            const x = p[0] + normals[i][0] * off;
+            const y = p[1] + normals[i][1] * off;
+            if (i) ctx.lineTo(x, y);
+            else ctx.moveTo(x, y);
+          });
+          ctx.strokeStyle = c;
+          ctx.stroke();
+        });
+      }
     }
     ctx.globalAlpha = 1;
     for (const s of data.stations) {
@@ -319,6 +343,7 @@ async function reload() {
   data.ready = false;
   tween(renderer.state, 'strength', 0, 500);
   tween(renderer.state, 'shade', 0, 300);
+  renderLineLegend(null);
   setStatus('Calculating travel times…', 'busy');
   updateSourceLine();
   anim.dirty = true;
@@ -336,6 +361,7 @@ async function reload() {
     data.source = res.source;
     data.stations = res.stations || null;
     data.lines = res.lines || null;
+    renderLineLegend(res.legend || null);
     showResult(res.times);
     const est = /estimate/i.test(res.source);
     setStatus(est ? 'Using estimated travel times.' : 'Travel times loaded.', est ? 'warn' : 'ok');
@@ -361,6 +387,20 @@ $('#loader-retry').addEventListener('click', () => {
   data = null; // force a fresh fetch (failures are never cached)
   reload();
 });
+
+function renderLineLegend(legend) {
+  const el = $('#line-legend');
+  el.innerHTML = '';
+  el.hidden = !legend?.length;
+  for (const l of legend || []) {
+    const chip = document.createElement('span');
+    chip.className = 'line-chip';
+    const sw = document.createElement('i');
+    sw.style.background = l.colour;
+    chip.append(sw, document.createTextNode(l.name));
+    el.append(chip);
+  }
+}
 
 // Real times are in: shade the map and warp it into the selected view.
 function showResult(times) {

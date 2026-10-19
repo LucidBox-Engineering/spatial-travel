@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=19';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=19';
-import { cached, DAY } from './cache.js?v=19';
+import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=20';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=20';
+import { cached, DAY } from './cache.js?v=20';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -83,7 +83,7 @@ export function extentFor(mode, budget) {
 // Retry-After, and repeated 429s pause all requests to it for a while (callers
 // then fall back to estimates). Successful responses are cached (see
 // cache.js) so revisiting a destination doesn't re-request.
-const throttle = (gap) => ({ gap, next: 0, chain: Promise.resolve(), pausedUntil: 0 });
+const throttle = (gap) => ({ base: gap, gap, next: 0, chain: Promise.resolve(), pausedUntil: 0 });
 const THROTTLED = {
   'routing.openstreetmap.de': throttle(1500), // FOSSGIS OSRM (walk/drive/train walking)
   'valhalla1.openstreetmap.de': throttle(1100), // FOSSGIS Valhalla fallback
@@ -93,6 +93,9 @@ const THROTTLED = {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// One request in flight per host, and request starts at least `gap` apart.
+// (Overlapping requests to the FOSSGIS router were what drew 429s: it
+// limits concurrent requests per client, not just their rate.)
 async function takeSlot(th) {
   const prev = th.chain;
   let release;
@@ -101,7 +104,7 @@ async function takeSlot(th) {
   const wait = th.next - Date.now();
   if (wait > 0) await sleep(wait);
   th.next = Date.now() + th.gap;
-  release();
+  return release;
 }
 
 export async function fetchJson(url, signal, timeoutMs = 20000, init = {}) {
@@ -113,10 +116,14 @@ export async function fetchJson(url, signal, timeoutMs = 20000, init = {}) {
 
 async function fetchJsonNet(url, signal, timeoutMs, init, th) {
   for (let attempt = 0; ; attempt++) {
+    let release = () => {};
     if (th) {
       if (Date.now() < th.pausedUntil) throw new Error('rate limited: pausing requests');
-      await takeSlot(th);
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      release = await takeSlot(th);
+      if (signal?.aborted) {
+        release();
+        throw new DOMException('Aborted', 'AbortError');
+      }
     }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -137,9 +144,10 @@ async function fetchJsonNet(url, signal, timeoutMs, init, th) {
         throw new Error('HTTP 429');
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (th) th.gap = Math.max(1100, th.gap * 0.9); // ease back after backing off
+      if (th) th.gap = Math.max(th.base, th.gap * 0.9); // ease back after backing off
       return await res.json();
     } finally {
+      release();
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
     }
@@ -632,25 +640,73 @@ function decodePolyline(str, precision) {
 
 // Rail/tram route shapes in the area, for drawing the lines on the map
 // (MOTIS "experimental/map/routes"; optional - failures just mean no lines).
-async function transitousLines(dest, radius, signal) {
-  const b = bboxAround(dest, radius);
-  const zoom = Math.max(6, Math.min(15, Math.round(Math.log2((EARTH_CIRC * Math.cos((dest.lat * Math.PI) / 180)) / (2 * radius)) + 3)));
+// Distinct, readable line colours for when GTFS colours are missing or clash.
+const LINE_PALETTE = ['#e6194b', '#4363d8', '#3cb44b', '#f58231', '#911eb4', '#0aa5b5', '#f032e6', '#9a6324', '#808000', '#000075', '#e6a100', '#469990'];
+
+// Bounding box (lat/lng) of local points, padded by `pad` metres.
+function bboxOfPoints(dest, pts, pad) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of pts) {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  const sw = fromLocal(dest, minX - pad, minY - pad);
+  const ne = fromLocal(dest, maxX + pad, maxY + pad);
+  return { south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng, span: Math.max(maxX - minX, maxY - minY) + 2 * pad };
+}
+
+async function fetchRoutes(dest, b, signal) {
+  const zoom = Math.max(6, Math.min(15, Math.round(Math.log2((EARTH_CIRC * Math.cos((dest.lat * Math.PI) / 180)) / b.span) + 3)));
   const q = new URLSearchParams({ zoom: String(zoom), min: `${b.south.toFixed(5)},${b.west.toFixed(5)}`, max: `${b.north.toFixed(5)},${b.east.toFixed(5)}` });
-  const json = await fetchJson(`${TRANSITOUS}/api/experimental/map/routes?${q}`, signal, 30000);
+  return fetchJson(`${TRANSITOUS}/api/experimental/map/routes?${q}`, signal, 30000);
+}
+
+// Rail/tram route shapes around the reachable stops, for drawing the lines
+// (MOTIS "experimental/map/routes"; optional - failures just mean no lines).
+// Returns { lines: [{ pts, routes: [key] }], legend: [{ key, name, colour }] }.
+async function transitousLines(dest, stops, signal) {
+  // 422 = area too big for the server: retry around the quickest 60%, then
+  // 35%, of the stations (the ones that matter most for the warp).
+  const byTime = [...stops].sort((a, b) => a.best - b.best);
+  let json;
+  for (const frac of [1, 0.6, 0.35]) {
+    const subset = byTime.slice(0, Math.max(2, Math.ceil(byTime.length * frac)));
+    try {
+      json = await fetchRoutes(dest, bboxOfPoints(dest, subset, frac === 1 ? 1500 : 800), signal);
+      break;
+    } catch (err) {
+      if (!/HTTP 422/.test(err.message) || frac === 0.35) throw err;
+    }
+  }
   const routes = json.routes || [];
+  // One legend entry per named line (directions / variants share a name).
+  const legend = new Map();
+  const keyOf = (r) => {
+    const tr = r.transitRoutes?.[0] || {};
+    const name = tr.shortName || tr.longName || `Line ${r.routeIdx ?? ''}`.trim();
+    if (!legend.has(name)) legend.set(name, { key: name, name, gtfs: tr.color ? `#${tr.color.replace(/^#/, '')}` : null, mode: r.mode });
+    return name;
+  };
   const lines = [];
   for (const pl of json.polylines || []) {
-    const rs = (pl.routeIndexes || []).map((i) => routes[i]).filter(Boolean);
-    const rail = rs.filter((r) => RAIL_MODES.has(r.mode));
+    const rail = (pl.routeIndexes || []).map((i) => routes[i]).filter((r) => r && RAIL_MODES.has(r.mode));
     if (!rail.length || !pl.polyline?.points) continue;
-    const colour = pl.colors?.[0] || rail[0].transitRoutes?.[0]?.color;
+    const keys = [...new Set(rail.map(keyOf))];
     const pts = decodePolyline(pl.polyline.points, pl.polyline.precision).map(([la, ln]) => {
       const [x, y] = toLocal(dest, la, ln);
       return { x, y };
     });
-    lines.push({ metro: rail.every((r) => r.mode === 'SUBWAY' || r.mode === 'TRAM'), colour: colour ? `#${colour.replace(/^#/, '')}` : null, pts });
+    lines.push({ pts, routes: keys });
   }
-  return lines;
+  // Use GTFS colours when every line has one and they're all different;
+  // otherwise assign palette colours so lines can be told apart.
+  const entries = [...legend.values()].filter((e) => lines.some((l) => l.routes.includes(e.key)));
+  const gtfs = entries.map((e) => e.gtfs);
+  const useGtfs = gtfs.every(Boolean) && new Set(gtfs.map((c) => c.toLowerCase())).size === gtfs.length;
+  entries.forEach((e, i) => (e.colour = useGtfs ? e.gtfs : LINE_PALETTE[i % LINE_PALETTE.length]));
+  const colourOf = new Map(entries.map((e) => [e.key, e.colour]));
+  for (const l of lines) l.colours = l.routes.map((k) => colourOf.get(k));
+  return { lines, legend: entries.map(({ name, colour }) => ({ name, colour })) };
 }
 
 // Arrive by 09:00 on the next weekday (browser local time) - a typical
@@ -740,28 +796,31 @@ async function transitousStops(dest, maxMinutes, signal) {
 
 async function trainTimesTransitous(dest, mesh, signal, onStatus, budget) {
   onStatus?.('Asking Transitous for timetable routes…');
-  const [{ stops, when }, lines] = await Promise.all([
-    transitousStops(dest, Math.ceil(budget * 1.3), signal),
-    transitousLines(dest, mesh.radius, signal).catch((err) => {
-      if (signal?.aborted) throw err;
-      console.warn('Transitous route shapes unavailable:', err);
-      return null;
-    }),
-  ]);
-  if (!stops.length) return null;
-  const best = stops.map((s) => s.best);
-  const label = `Transitous timetables (arrive ${when.toLocaleDateString(undefined, { weekday: 'short' })} 09:00), ${stops.length} stops`;
-  const intercity = mesh.radius * 1.15 > INTERCITY_RADIUS;
-  if (intercity) {
-    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops, lines };
+  const { stops, when } = await transitousStops(dest, Math.ceil(budget * 1.3), signal);
+  const label = `Transitous timetables (arrive ${when.toLocaleDateString(undefined, { weekday: 'short' })} 09:00)`;
+  if (!stops.length) {
+    // Transitous answered: no rail/tram within walking distance of the
+    // destination. That's a real answer, so don't fall back to Overpass.
+    return { times: timesViaStations(mesh, [], []), source: `${label}: no rail or tram within walking distance of the destination`, stations: [] };
   }
+  onStatus?.('Loading line shapes…');
+  const shapes = await transitousLines(dest, stops, signal).catch((err) => {
+    if (signal?.aborted) throw err;
+    console.warn('Transitous route shapes unavailable:', err);
+    return { lines: null, legend: null };
+  });
+  const best = stops.map((s) => s.best);
+  const base = { stations: stops, lines: shapes.lines, legend: shapes.legend };
+  const src = `${label}, ${stops.length} stations`;
+  const intercity = mesh.radius * 1.15 > INTERCITY_RADIUS;
+  if (intercity) return { ...base, times: timesViaStations(mesh, stops, best), source: `${src}, walking estimated` };
   try {
     const envelope = budget + Math.max(10, 0.25 * budget);
     const res = await refineAccess(dest, mesh, stops, best, envelope, signal, onStatus);
-    return { times: res.times, source: `${label}, ${res.refined} walking routes`, stations: stops, lines };
+    return { ...base, times: res.times, source: `${src}, ${res.refined} walking routes` };
   } catch (err) {
     if (signal?.aborted) throw err;
-    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops, lines };
+    return { ...base, times: timesViaStations(mesh, stops, best), source: `${src}, walking estimated` };
   }
 }
 

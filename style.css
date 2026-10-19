@@ -523,3 +523,23 @@ footer {
   font-weight: 600;
   font-size: 12px;
 }
+
+#line-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.line-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.line-chip i {
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+}
