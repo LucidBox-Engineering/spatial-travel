@@ -10,8 +10,8 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=9';
-import { fetchNetwork, stationTimes } from './transit.js?v=9';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=10';
+import { fetchNetwork, stationTimes } from './transit.js?v=10';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
