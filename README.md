@@ -22,7 +22,7 @@ Hover for the travel time at any point; scroll to zoom, drag to pan, double-clic
 
 Road times are sampled on a 24 × 9 polar grid and used to correct a heuristic model on the 128 × 56 render mesh. Train times are **estimates**: there is no free, keyless timetable API, so the model knows where stations are but not which lines connect them.
 
-Basemap tiles: CARTO Voyager (© OpenStreetMap contributors, © CARTO). Geocoding: Nominatim.
+Basemap tiles: OpenStreetMap standard tiles (© OpenStreetMap contributors), no API key. Geocoding: Nominatim. None of the services used need an API key.
 
 ## How it works
 

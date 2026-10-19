@@ -3,18 +3,13 @@
 
 import { worldPx, EARTH_CIRC } from './geo.js';
 
+// OpenStreetMap's standard tiles: free, no API key, CORS-enabled. To stay
+// within the OSM tile usage policy we fetch a modest number of 256px tiles
+// (about one screenful) per destination.
 const SOURCES = [
-  {
-    name: 'CARTO Voyager',
-    url: (z, x, y, retina) =>
-      `https://${'abcd'[(x + y) % 4]}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}${retina ? '@2x' : ''}.png`,
-    retina: true,
-    maxZoom: 19,
-  },
   {
     name: 'OpenStreetMap',
     url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
-    retina: false,
     maxZoom: 19,
   },
 ];
@@ -32,8 +27,8 @@ function loadImage(src) {
 // Returns { canvas, size, z, tileSize, ox, oy, uv(lat,lng), done: Promise }.
 // `onProgress` is called (throttled by the caller) as tiles arrive.
 export function buildBasemap(center, radius, maxTex, onProgress, signal) {
-  const size = Math.min(4096, maxTex);
-  const tileSize = size >= 4096 ? 512 : 256;
+  const size = Math.min(2048, maxTex);
+  const tileSize = 256;
   const lat = center.lat;
   // pixels per metre at zoom z for this tile size
   const ppm = (z) => (tileSize * Math.pow(2, z)) / (EARTH_CIRC * Math.cos((lat * Math.PI) / 180));
@@ -80,10 +75,8 @@ export function buildBasemap(center, radius, maxTex, onProgress, signal) {
     const dy = t.ty * tileSize - oy;
     for (let s = sourceIdx; s < SOURCES.length; s++) {
       const src = SOURCES[s];
-      // 256px sources at retina layout: fetch one zoom deeper would be
-      // ideal, but simply upscaling keeps tile counts low for a fallback.
       try {
-        const img = await loadImage(src.url(z, wx, t.ty, tileSize === 512 && src.retina));
+        const img = await loadImage(src.url(z, wx, t.ty));
         if (signal?.aborted) return;
         ctx.drawImage(img, dx, dy, tileSize, tileSize);
         loaded++;
@@ -97,7 +90,7 @@ export function buildBasemap(center, radius, maxTex, onProgress, signal) {
 
   const done = (async () => {
     const queue = tiles.slice();
-    const workers = Array.from({ length: 8 }, async () => {
+    const workers = Array.from({ length: 4 }, async () => {
       while (queue.length && !signal?.aborted) {
         await loadTile(queue.shift());
         onProgress?.();

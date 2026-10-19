@@ -31,10 +31,9 @@ let userView = null; // manual pan/zoom override { cx, cy, scale }
 // Leaflet picker map
 
 const map = L.map('pickmap', { zoomControl: true, zoomSnap: 0.25 }).setView([43.6532, -79.3832], 11);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-  subdomains: 'abcd',
-  maxZoom: 20,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
 }).addTo(map);
 let marker = null;
 let reachCircle = null;
