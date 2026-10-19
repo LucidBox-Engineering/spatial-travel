@@ -15,8 +15,8 @@
 // best time to the destination using only real lines and paying for waits and
 // transfers. Map points then add the time to reach a station.
 
-import { toLocal, bboxAround } from './geo.js?v=17';
-import { cached, DAY } from './cache.js?v=17';
+import { toLocal, bboxAround } from './geo.js?v=18';
+import { cached, DAY } from './cache.js?v=18';
 
 // Public Overpass instances, tried in order. overpass-api.de is the one that
 // reliably answers, but can be slow (~45 s seen for a city query) or shed

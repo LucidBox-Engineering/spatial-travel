@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=17';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=17';
-import { cached, DAY } from './cache.js?v=17';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=18';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=18';
+import { cached, DAY } from './cache.js?v=18';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -89,6 +89,7 @@ const THROTTLED = {
   'valhalla1.openstreetmap.de': throttle(1100), // FOSSGIS Valhalla fallback
   'router.project-osrm.org': throttle(1100), // OSRM demo server fallback
   'nominatim.openstreetmap.org': throttle(1100), // usage policy: max 1 request/second
+  'api.transitous.org': throttle(2000), // community service; one-to-all is expensive
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -584,7 +585,124 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
   return { times: timesViaStations(mesh, stations, best, access), refined: measured.size };
 }
 
+// ---------------------------------------------------------------------------
+// Train via Transitous (https://transitous.org): a community-run MOTIS
+// journey planner over public GTFS timetables. One "one-to-all" request with
+// arriveBy=true returns every stop from which the destination can be reached
+// within maxTravelTime, with the fastest door-to-destination duration
+// (including transfers and the final walk). That replaces the OSM rail-line
+// model's guessed speeds and headways with real timetables.
+
+const TRANSITOUS = 'https://api.transitous.org';
+const TRANSITOUS_VERSIONS = ['v6', 'v5', 'v4', 'v3', 'v2', 'v1']; // newest first; servers lag MOTIS master
+// "RAIL" = high-speed, long-distance, night, regional, suburban and subway;
+// TRAM adds light rail such as Calgary's CTrain.
+const TRAIN_MODES = 'RAIL,TRAM';
+
+// Arrive by 09:00 on the next weekday (browser local time) - a typical
+// commute, and a stable URL so results cache well.
+function nextWeekdayNine() {
+  const d = new Date();
+  d.setHours(9, 0, 0, 0);
+  if (d <= new Date()) d.setDate(d.getDate() + 1);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+async function transitousStops(dest, maxMinutes, signal) {
+  const when = nextWeekdayNine();
+  const params = (minutes) =>
+    new URLSearchParams({
+      one: `${dest.lat.toFixed(6)},${dest.lng.toFixed(6)}`,
+      arriveBy: 'true',
+      time: when.toISOString(),
+      maxTravelTime: String(minutes),
+      transitModes: TRAIN_MODES,
+    });
+  let json = null;
+  let lastErr = null;
+  outer: for (const version of TRANSITOUS_VERSIONS) {
+    for (const minutes of [maxMinutes, Math.min(maxMinutes, 90)].filter((m, i, a) => a.indexOf(m) === i)) {
+      try {
+        json = await fetchJson(`${TRANSITOUS}/api/${version}/one-to-all?${params(minutes)}`, signal, 60000);
+        break outer;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        lastErr = err;
+        if (/HTTP 404/.test(err.message)) continue outer; // endpoint version not deployed
+        if (/HTTP 4\d\d/.test(err.message)) continue; // maybe over the server's travel-time limit
+        throw err; // network / 5xx: give up on Transitous
+      }
+    }
+  }
+  if (!json) throw lastErr || new Error('Transitous: no usable endpoint');
+  const all = (json.all || []).filter((r) => r.place && Number.isFinite(r.place.lat) && Number.isFinite(r.duration));
+  // `duration` is documented only as "total travel duration"; MOTIS reports
+  // minutes, but guard against seconds.
+  const maxD = Math.max(0, ...all.map((r) => r.duration));
+  const toMin = maxD > maxMinutes * 3 ? 1 / 60 : 1;
+  // Merge platforms / entrances of one station (within 60 m), keeping the
+  // fastest time.
+  const MERGE = 60;
+  const stops = [];
+  const grid = new Map();
+  for (const r of all) {
+    const [x, y] = toLocal(dest, r.place.lat, r.place.lon);
+    const best = r.duration * toMin;
+    const cx = Math.floor(x / MERGE);
+    const cy = Math.floor(y / MERGE);
+    let hit = null;
+    for (let dx = -1; dx <= 1 && !hit; dx++) {
+      for (let dy = -1; dy <= 1 && !hit; dy++) {
+        hit = (grid.get(`${cx + dx},${cy + dy}`) || []).find((s) => Math.hypot(s.x - x, s.y - y) < MERGE) || null;
+      }
+    }
+    if (hit) {
+      hit.best = Math.min(hit.best, best);
+      continue;
+    }
+    const stop = { x, y, best, k: r.k ?? null, name: r.place.name || '', metro: false, lines: 1 };
+    stops.push(stop);
+    const key = `${cx},${cy}`;
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key).push(stop);
+  }
+  return { stops, when };
+}
+
+async function trainTimesTransitous(dest, mesh, signal, onStatus, budget) {
+  onStatus?.('Asking Transitous for timetable routes…');
+  const { stops, when } = await transitousStops(dest, Math.ceil(budget * 1.3), signal);
+  if (!stops.length) return null;
+  const best = stops.map((s) => s.best);
+  const label = `Transitous timetables (arrive ${when.toLocaleDateString(undefined, { weekday: 'short' })} 09:00), ${stops.length} stops`;
+  const intercity = mesh.radius * 1.15 > INTERCITY_RADIUS;
+  if (intercity) {
+    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops };
+  }
+  try {
+    const envelope = budget + Math.max(10, 0.25 * budget);
+    const res = await refineAccess(dest, mesh, stops, best, envelope, signal, onStatus);
+    return { times: res.times, source: `${label}, ${res.refined} walking routes`, stations: stops };
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops };
+  }
+}
+
 async function trainTimes(dest, mesh, signal, onStatus, budget) {
+  // Prefer real timetables; fall back to the OSM rail-line model.
+  try {
+    const res = await trainTimesTransitous(dest, mesh, signal, onStatus, budget);
+    if (res) return res;
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    console.warn('Transitous failed, falling back to OSM rail lines:', err);
+  }
+  return trainTimesOsm(dest, mesh, signal, onStatus, budget);
+}
+
+async function trainTimesOsm(dest, mesh, signal, onStatus, budget) {
   onStatus?.('Loading rail lines…');
   const fetchRadius = mesh.radius * 1.15;
   const net = await fetchNetwork(dest, fetchRadius, signal);
