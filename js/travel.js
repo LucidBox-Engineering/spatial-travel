@@ -10,8 +10,8 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=12';
-import { fetchNetwork, stationTimes } from './transit.js?v=12';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=13';
+import { fetchNetwork, stationTimes } from './transit.js?v=13';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -76,18 +76,68 @@ export function extentFor(mode, budget) {
 // ---------------------------------------------------------------------------
 // Network helpers
 
+// The free FOSSGIS routing server rate-limits per client (HTTP 429), so
+// requests to it are spaced out, a 429 is retried once after the server's
+// Retry-After, and repeated 429s pause all requests to it for a while (callers
+// then fall back to estimates). Successful responses are cached so switching
+// modes or views and coming back doesn't re-request.
+const THROTTLED = {
+  'routing.openstreetmap.de': { gap: 1100, next: 0, chain: Promise.resolve(), pausedUntil: 0 },
+};
+const responseCache = new Map();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function takeSlot(th) {
+  const prev = th.chain;
+  let release;
+  th.chain = new Promise((r) => (release = r));
+  await prev;
+  const wait = th.next - Date.now();
+  if (wait > 0) await sleep(wait);
+  th.next = Date.now() + th.gap;
+  release();
+}
+
 async function fetchJson(url, signal, timeoutMs = 20000, init = {}) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  const onAbort = () => ctrl.abort();
-  signal?.addEventListener('abort', onAbort);
-  try {
-    const res = await fetch(url, { ...init, signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', onAbort);
+  const th = THROTTLED[new URL(url).host];
+  const cacheable = th && !init.method;
+  if (cacheable && responseCache.has(url)) return responseCache.get(url);
+  for (let attempt = 0; ; attempt++) {
+    if (th) {
+      if (Date.now() < th.pausedUntil) throw new Error('rate limited: pausing requests');
+      await takeSlot(th);
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const onAbort = () => ctrl.abort();
+    signal?.addEventListener('abort', onAbort);
+    try {
+      const res = await fetch(url, { ...init, signal: ctrl.signal });
+      if (res.status === 429 && th) {
+        const retryAfter = Number(res.headers.get('Retry-After')) || 0;
+        const wait = Math.max(2000, retryAfter * 1000);
+        // Slow down for everyone, not just this request.
+        th.gap = Math.min(5000, th.gap * 2);
+        if (attempt === 0 && wait <= 10000) {
+          th.next = Date.now() + wait;
+          continue;
+        }
+        th.pausedUntil = Date.now() + Math.max(30000, wait);
+        throw new Error('HTTP 429');
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (th) th.gap = Math.max(1100, th.gap * 0.9); // ease back after backing off
+      const json = await res.json();
+      if (cacheable) {
+        if (responseCache.size > 300) responseCache.delete(responseCache.keys().next().value);
+        responseCache.set(url, json);
+      }
+      return json;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
   }
 }
 
@@ -352,7 +402,7 @@ function timesViaStations(mesh, stations, best, access = crowAccess) {
 //      destination);
 //   3. the area is tiled and each tile sends one many-to-many OSRM foot
 //      "table" request (sample points x the stations they could use), at
-//      most MAX_REQUESTS of them, 4 in flight, stopping at a time deadline;
+//      most MAX_REQUESTS of them, rate-limited, stopping at a time deadline;
 //      the results become per-station detour ratios;
 //   4. every vertex near a sampled station uses the measured time if it was
 //      sampled, otherwise the crow-fly estimate scaled by the ratio of the
@@ -362,10 +412,10 @@ const INTERCITY_RADIUS = 150000; // fetch radius in metres; same as the mainline
 const FOOT_TABLE = 'https://routing.openstreetmap.de/routed-foot/table/v1/foot';
 const WALK_RANGE = 1500; // crow-fly metres considered "walkable" to a station
 const MAX_COORDS = 100; // per OSRM table request
-const MAX_REQUESTS = 12;
+const MAX_REQUESTS = 8;
 const MAX_TARGETS = 30; // stations per request; the rest of the slots are sample points
-const CONCURRENCY = 4;
-const DEADLINE_MS = 10000; // stop issuing requests after this; unsampled pairs are interpolated
+const CONCURRENCY = 2; // the shared throttle spaces request starts anyway
+const DEADLINE_MS = 12000; // stop issuing requests after this; unsampled pairs are interpolated
 const crowWalk = (d) => (d * 1.25) / 75;
 const feeder = (d) => (d * 1.25 > 1500 ? stationAccess(d) : Infinity);
 
