@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=6';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=6';
-import { buildBasemap } from './basemap.js?v=6';
-import { WarpRenderer } from './renderer.js?v=6';
-import { fromLocal } from './geo.js?v=6';
+import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=7';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=7';
+import { buildBasemap } from './basemap.js?v=7';
+import { WarpRenderer } from './renderer.js?v=7';
+import { fromLocal } from './geo.js?v=7';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -55,14 +55,44 @@ renderer &&
   (renderer.overlayDraw = (ctx, r) => {
     if (!data?.stations || !warps) return;
     const pos = currentPositions();
+    // Project each station once per frame; lines reuse the projections.
+    const proj = new Map();
+    const project = (s) => {
+      if (!proj.has(s)) {
+        const p = forward(data.mesh, pos, s.x, s.y);
+        proj.set(s, p && r.toScreen(p[0], p[1]));
+      }
+      return proj.get(s);
+    };
     ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (const line of data.lines || []) {
+      ctx.beginPath();
+      let pen = false;
+      for (const s of line.pts) {
+        const q = project(s);
+        if (!q) {
+          pen = false;
+          continue;
+        }
+        if (pen) ctx.lineTo(q[0], q[1]);
+        else ctx.moveTo(q[0], q[1]);
+        pen = true;
+      }
+      ctx.lineWidth = line.metro ? 2 : 2.5;
+      ctx.strokeStyle = line.colour || (line.metro ? '#2457c5' : '#1f2a37');
+      ctx.globalAlpha = 0.55;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
     for (const s of data.stations) {
-      const p = forward(data.mesh, pos, s.x, s.y);
-      if (!p) continue;
-      const [sx, sy] = r.toScreen(p[0], p[1]);
+      const q = project(s);
+      if (!q) continue;
+      const [sx, sy] = q;
       if (sx < -10 || sy < -10 || sx > r.width + 10 || sy > r.height + 10) continue;
       ctx.beginPath();
-      ctx.arc(sx, sy, s.metro ? 2.6 : 3.2, 0, Math.PI * 2);
+      ctx.arc(sx, sy, s.lines > 1 ? 3.6 : s.metro ? 2.6 : 3.2, 0, Math.PI * 2);
       ctx.fillStyle = s.metro ? '#2457c5' : '#1f2a37';
       ctx.fill();
       ctx.lineWidth = 1;
@@ -274,7 +304,7 @@ async function reload() {
     uvs[2 * v + 1] = w;
   }
   const times = heuristicTimes(state.mode, mesh);
-  data = { key, mesh, basemap, times, source: 'Quick estimate (loading real data…)', stations: null, bucket };
+  data = { key, mesh, basemap, times, source: 'Quick estimate (loading real data…)', stations: null, lines: null, bucket };
   renderer.setMesh(mesh, uvs);
   renderer.setTexture(basemap.canvas);
   renderer.setTimes(times);
@@ -295,6 +325,7 @@ async function reload() {
     data.times = res.times;
     data.source = res.source;
     data.stations = res.stations || null;
+    data.lines = res.lines || null;
     morphTo(res.times);
     const est = /estimate/i.test(res.source);
     setStatus(est ? 'Using estimated travel times.' : 'Travel times loaded.', est ? 'warn' : 'ok');

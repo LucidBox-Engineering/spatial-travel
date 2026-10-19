@@ -10,7 +10,8 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=6';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=7';
+import { fetchNetwork, stationTimes } from './transit.js?v=7';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -234,7 +235,8 @@ function correctHeuristic(mode, mesh, samples, observed) {
 }
 
 // ---------------------------------------------------------------------------
-// Train: OSM stations + a station-to-station model.
+// Train: OSM rail lines (see transit.js), falling back to station
+// locations with a station-to-station model when no line data exists.
 
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 
@@ -294,25 +296,30 @@ function rideTime(a, b) {
   return (D * 1.15) / ((kmh * 1000) / 60) + (a.metro !== b.metro ? 4 : 0);
 }
 
-function trainTimes(mesh, stations) {
+// Station-only fallback: no line data, so assume any station reaches any
+// other directly at line speed.
+function bestFromStationsOnly(stations) {
   const WAIT = 6;
   const byEgress = stations
     .map((s) => ({ s, egress: stationAccess(Math.hypot(s.x, s.y)) }))
     .sort((p, q) => p.egress - q.egress)
     .slice(0, 10);
-  const best = new Float64Array(stations.length);
-  stations.forEach((a, k) => {
+  return stations.map((a) => {
     let m = Infinity;
     for (const { s, egress } of byEgress) m = Math.min(m, (a === s ? 0 : rideTime(a, s)) + egress);
-    best[k] = m + WAIT;
+    return m + WAIT;
   });
+}
+
+// Per mesh vertex: soft minimum over "go directly" and "get to station k,
+// then best[k] from there", so station catchment boundaries blend instead of
+// forming sharp creases.
+function timesViaStations(mesh, stations, best) {
+  const TAU = 1.5;
   const times = new Float32Array(mesh.count);
   for (let v = 0; v < mesh.count; v++) {
     const x = mesh.x[v];
     const y = mesh.y[v];
-    // Soft minimum over "walk directly" and every station, so station
-    // catchment boundaries blend instead of forming sharp creases.
-    const TAU = 1.5;
     let m = stationAccess(Math.hypot(x, y));
     let sum = 1;
     for (let k = 0; k < stations.length; k++) {
@@ -330,6 +337,38 @@ function trainTimes(mesh, stations) {
   return times;
 }
 
+async function trainTimes(dest, mesh, signal, onStatus) {
+  onStatus?.('Loading rail lines…');
+  const net = await fetchNetwork(dest, mesh.radius * 1.15, signal);
+  if (net && net.lines.length) {
+    onStatus?.('Routing through the rail network…');
+    const best = stationTimes(net, (s) => stationAccess(Math.hypot(s.x, s.y)));
+    const idx = [];
+    for (let k = 0; k < net.stations.length; k++) if (Number.isFinite(best[k])) idx.push(k);
+    const stations = idx.map((k) => net.stations[k]);
+    return {
+      times: timesViaStations(mesh, stations, idx.map((k) => best[k])),
+      source: `${net.lines.length} OSM rail lines, ${stations.length} stations + network model`,
+      stations,
+      lines: net.lines.map((l) => ({ metro: l.metro, colour: l.colour, pts: l.seq.map((s) => net.stations[s]) })),
+    };
+  }
+  // No route data: fall back to station locations only.
+  onStatus?.('Finding train stations…');
+  const stations = await fetchStations(dest, mesh.radius * 1.15, signal);
+  if (stations && stations.length) {
+    return {
+      times: timesViaStations(mesh, stations, bestFromStationsOnly(stations)),
+      source: `${stations.length} OSM stations (no line data) + rail speed model`,
+      stations,
+    };
+  }
+  return {
+    times: heuristicTimes('train', mesh),
+    source: stations ? 'No stations nearby — bus/walk estimate' : 'Rail lookup failed — estimate',
+  };
+}
+
 // ---------------------------------------------------------------------------
 
 export function heuristicTimes(mode, mesh) {
@@ -338,23 +377,9 @@ export function heuristicTimes(mode, mesh) {
   return times;
 }
 
-// Returns { times: Float32Array (per mesh vertex), source: string, stations? }
+// Returns { times: Float32Array (per mesh vertex), source: string, stations?, lines? }
 export async function computeTimes(dest, mode, mesh, signal, onStatus) {
-  if (mode === 'train') {
-    onStatus?.('Finding train stations…');
-    const stations = await fetchStations(dest, mesh.radius * 1.15, signal);
-    if (stations && stations.length) {
-      return {
-        times: trainTimes(mesh, stations),
-        source: `${stations.length} OSM stations + rail speed model`,
-        stations,
-      };
-    }
-    return {
-      times: heuristicTimes(mode, mesh),
-      source: stations ? 'No stations nearby — bus/walk estimate' : 'Station lookup failed — estimate',
-    };
-  }
+  if (mode === 'train') return trainTimes(dest, mesh, signal, onStatus);
   const res = await roadTimes(dest, mode, mesh, signal, onStatus);
   if (res) return res;
   return { times: heuristicTimes(mode, mesh), source: 'Routing servers unreachable — estimate' };
