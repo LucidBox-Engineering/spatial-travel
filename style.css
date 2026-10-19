@@ -246,6 +246,18 @@ footer {
   padding-top: 10px;
 }
 
+.made-with {
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+}
+
+.made-with img {
+  display: block;
+  height: 17px;
+  width: auto;
+}
+
 #status {
   margin: 0 0 6px;
   font-weight: 600;

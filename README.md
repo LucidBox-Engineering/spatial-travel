@@ -44,3 +44,5 @@ When changing JS/CSS, bump the `?v=` query in `index.html` and the `import` line
 - Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors; vector tiles from [OpenFreeMap](https://openfreemap.org) (© OpenMapTiles); raster tiles from openstreetmap.org.
 - Public transit timetables via [Transitous](https://transitous.org); routing via FOSSGIS OSRM/Valhalla; geocoding via Nominatim; rail data via Overpass.
 - Vendored libraries: [Leaflet](https://leafletjs.com) (BSD-2), [pbf](https://github.com/mapbox/pbf) (BSD-3), [@mapbox/vector-tile](https://github.com/mapbox/vector-tile-js) (BSD-3), [@mapbox/point-geometry](https://github.com/mapbox/point-geometry) (ISC).
+
+Made with ❤️ by <a href="https://lucidbox.ca"><img src="assets/lucidbox.svg" alt="LucidBox" height="17" align="center" /></a> in 🇨🇦
