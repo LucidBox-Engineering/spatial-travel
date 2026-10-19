@@ -10,7 +10,7 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=4';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=5';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -54,7 +54,7 @@ export function heuristic(mode, d) {
 // Crow-fly distance reachable within `minutes` according to the heuristic.
 function heuristicReach(mode, minutes) {
   let lo = 0;
-  let hi = 400000;
+  let hi = 4000000;
   for (let i = 0; i < 40; i++) {
     const mid = (lo + hi) / 2;
     if (heuristic(mode, mid) < minutes) lo = mid;
@@ -65,7 +65,7 @@ function heuristicReach(mode, minutes) {
 
 // The fetched area depends on a bucketed budget so that small slider moves can
 // reuse the same data.
-const BUCKETS = [10, 20, 30, 45, 60, 90, 120];
+const BUCKETS = [10, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720];
 
 export function extentFor(mode, budget) {
   const bucket = BUCKETS.find((b) => b >= budget) ?? BUCKETS[BUCKETS.length - 1];
@@ -106,7 +106,7 @@ function osrmProvider(name, base, profile) {
         if (sec == null) return NaN;
         // Points off the network (lakes, parks, fields) are snapped to the
         // nearest road; charge walking time for that gap.
-        return sec / 60 + Math.min(90, snap / 70);
+        return sec / 60 + Math.min(720, snap / 70);
       });
     },
   };
@@ -241,19 +241,28 @@ const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.k
 async function fetchStations(dest, radius, signal) {
   const b = bboxAround(dest, radius);
   const bbox = `${b.south},${b.west},${b.north},${b.east}`;
-  const q = `[out:json][timeout:25];(
+  // Inter-city extents: only proper rail stations (no halts or metro), and
+  // thinned to one per grid cell so the model stays fast.
+  const regional = radius > 150000;
+  const q = regional
+    ? `[out:json][timeout:60];(
+    nwr["railway"="station"]["station"!~"^(subway|light_rail|monorail|funicular|tram|miniature)$"](${bbox});
+  );out center tags;`
+    : `[out:json][timeout:25];(
     nwr["railway"~"^(station|halt)$"](${bbox});
     nwr["public_transport"="station"]["train"="yes"](${bbox});
     nwr["station"~"^(subway|light_rail)$"](${bbox});
   );out center tags;`;
+  const cell = Math.max(150, radius / 70);
   for (const url of OVERPASS) {
     try {
-      const json = await fetchJson(url, signal, 30000, {
+      const json = await fetchJson(url, signal, regional ? 75000 : 30000, {
         method: 'POST',
         body: 'data=' + encodeURIComponent(q),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
       const stations = [];
+      const seen = new Set();
       for (const el of json.elements || []) {
         const lat = el.lat ?? el.center?.lat;
         const lng = el.lon ?? el.center?.lon;
@@ -262,8 +271,11 @@ async function fetchStations(dest, radius, signal) {
         if (t.railway === 'tram_stop' || t.station === 'tram' || t.disused || t['abandoned:railway']) continue;
         const [x, y] = toLocal(dest, lat, lng);
         const metro = t.station === 'subway' || t.subway === 'yes' || t.station === 'light_rail';
-        // de-duplicate station nodes / areas mapped twice
-        if (stations.some((s) => Math.hypot(s.x - x, s.y - y) < 150)) continue;
+        // de-duplicate station nodes / areas mapped twice (and thin out
+        // dense areas at large scales): keep one station per grid cell
+        const key = `${Math.floor(x / cell)},${Math.floor(y / cell)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         stations.push({ x, y, metro, name: t.name || '' });
       }
       return stations;

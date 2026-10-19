@@ -6,9 +6,9 @@
     <title>Time Warp Map</title>
     <meta name="description" content="A map that warps by travel time: closer in time means closer in space, or bigger." />
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="style.css?v=4" />
+    <link rel="stylesheet" href="style.css?v=5" />
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script type="module" src="js/main.js?v=4"></script>
+    <script type="module" src="js/main.js?v=5"></script>
   </head>
   <body>
     <aside id="panel">
@@ -26,7 +26,7 @@
         <ul id="results"></ul>
         <p class="hint">…or click anywhere on the map.</p>
         <p class="dest"><span class="pin"></span><span id="dest-name">No destination yet</span></p>
-        <button id="example-btn" class="link" type="button">Try an example: Union Station, Toronto by train</button>
+        <p class="examples">Try: <button id="example-btn" class="link" type="button">Union Station by train, 45 min</button> · <button id="example-city-btn" class="link" type="button">Toronto by car, 4 h (inter-city)</button></p>
       </section>
 
       <section>
@@ -41,7 +41,7 @@
       <section>
         <h2><span class="step">3</span> Acceptable travel time</h2>
         <div class="range-row">
-          <input id="budget" type="range" min="5" max="120" step="5" value="30" aria-label="Acceptable travel time" />
+          <input id="budget" type="range" min="0" max="24" step="1" value="5" aria-label="Acceptable travel time" />
           <output id="budget-val">30 min</output>
         </div>
       </section>

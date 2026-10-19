@@ -1,20 +1,31 @@
 // Small geographic helpers. All "local" coordinates are metres east (x) and
-// north (y) of a reference point, using an equirectangular approximation that
-// is accurate enough for the < 200 km extents this app works with.
+// north (y) of a reference point.
 
 export const EARTH_CIRC = 40075016.686;
-const M_PER_DEG_LAT = 111132;
 
-export function mPerDegLng(lat) {
-  return 111320 * Math.cos((lat * Math.PI) / 180);
-}
+// Azimuthal equidistant projection centred on `origin`: distances and
+// bearings from the origin are exact, so the app also works at inter-city
+// scales (hundreds of km).
+const R_EARTH = 6371008.8;
+const RAD = Math.PI / 180;
 
 export function toLocal(origin, lat, lng) {
-  return [(lng - origin.lng) * mPerDegLng(origin.lat), (lat - origin.lat) * M_PER_DEG_LAT];
+  const p1 = origin.lat * RAD;
+  const p2 = lat * RAD;
+  const dl = (lng - origin.lng) * RAD;
+  const h = Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+  const d = 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(h)));
+  const brg = Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl));
+  return [d * Math.sin(brg), d * Math.cos(brg)];
 }
 
 export function fromLocal(origin, x, y) {
-  return { lat: origin.lat + y / M_PER_DEG_LAT, lng: origin.lng + x / mPerDegLng(origin.lat) };
+  const d = Math.hypot(x, y) / R_EARTH;
+  const brg = Math.atan2(x, y);
+  const p1 = origin.lat * RAD;
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(brg));
+  const l2 = origin.lng * RAD + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(p1), Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+  return { lat: p2 / RAD, lng: ((((l2 / RAD + 540) % 360) + 360) % 360) - 180 };
 }
 
 // Web Mercator world pixel coordinates at a given zoom and tile size.
@@ -32,7 +43,18 @@ export function metresPerPx(lat, z) {
 }
 
 export function bboxAround(origin, radius) {
-  const sw = fromLocal(origin, -radius, -radius);
-  const ne = fromLocal(origin, radius, radius);
-  return { south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng };
+  const b = { south: 90, west: 180, north: -90, east: -180 };
+  for (let k = 0; k < 72; k++) {
+    const th = (k / 72) * 2 * Math.PI;
+    for (const f of [1, Math.SQRT2]) {
+      const p = fromLocal(origin, radius * f * Math.sin(th), radius * f * Math.cos(th));
+      b.south = Math.min(b.south, p.lat);
+      b.north = Math.max(b.north, p.lat);
+      b.west = Math.min(b.west, p.lng);
+      b.east = Math.max(b.east, p.lng);
+    }
+  }
+  b.south = Math.max(-85, b.south);
+  b.north = Math.min(85, b.north);
+  return b;
 }

@@ -4,7 +4,7 @@ A static web app that warps a map around a destination according to travel time.
 
 1. Pick a destination (search or click the map).
 2. Pick a mode: walk, drive or train.
-3. Pick an acceptable travel time (5–120 min).
+3. Pick an acceptable travel time (5 min – 12 h; longer budgets cover inter-city trips).
 4. Choose a view:
    - **Time = distance** – every place is moved along its bearing so its distance from the destination is proportional to its travel time. Rings are exact isochrones.
    - **Time = size** – places reachable quickly are magnified (up to 3×), places beyond the budget shrink (down to ⅓× at twice the budget).

@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=4';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=4';
-import { buildBasemap } from './basemap.js?v=4';
-import { WarpRenderer } from './renderer.js?v=4';
-import { fromLocal } from './geo.js?v=4';
+import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=5';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=5';
+import { buildBasemap } from './basemap.js?v=5';
+import { WarpRenderer } from './renderer.js?v=5';
+import { fromLocal } from './geo.js?v=5';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -413,10 +413,15 @@ document.querySelectorAll('[data-view]').forEach((b) =>
   }),
 );
 
+// Non-linear slider: fine steps for local trips, coarse for inter-city.
+const BUDGET_STEPS = [5, 10, 15, 20, 25, 30, 40, 45, 50, 60, 75, 90, 105, 120, 150, 180, 210, 240, 300, 360, 420, 480, 540, 600, 720];
 const budgetInput = $('#budget');
+budgetInput.max = BUDGET_STEPS.length - 1;
+const budgetIndex = (m) =>
+  BUDGET_STEPS.reduce((best, v, i) => (Math.abs(v - m) < Math.abs(BUDGET_STEPS[best] - m) ? i : best), 0);
 let budgetTimer = null;
 budgetInput.addEventListener('input', () => {
-  state.budget = Number(budgetInput.value);
+  state.budget = BUDGET_STEPS[Number(budgetInput.value)];
   $('#budget-val').textContent = formatMinutes(state.budget);
   $('#legend-max').textContent = formatMinutes(state.budget);
   if (!data) return;
@@ -441,6 +446,13 @@ $('#example-btn').addEventListener('click', () => {
   state.budget = 45;
   syncControls();
   setDestination({ lat: 43.6453, lng: -79.3806 }, 'Union Station, Toronto');
+});
+$('#example-city-btn').addEventListener('click', () => {
+  state.mode = 'drive';
+  state.budget = 240;
+  syncControls();
+  map.setView([43.6532, -79.3832], 6);
+  setDestination({ lat: 43.6532, lng: -79.3832 }, 'Toronto');
 });
 
 // Search (Nominatim)
@@ -624,7 +636,7 @@ function hover(e) {
   }
   const km = Math.hypot(hit.x, hit.y) / 1000;
   const t = Math.round(hit.time);
-  tip.innerHTML = `<b>${t < 1 ? '< 1' : t} min</b> ${MODES[state.mode].icon}<br><span>${km < 1 ? Math.round(km * 1000) + ' m' : km.toFixed(1) + ' km'} away${hit.time > state.budget ? ' · over budget' : ''}</span>`;
+  tip.innerHTML = `<b>${t < 1 ? '< 1 min' : formatMinutes(t)}</b> ${MODES[state.mode].icon}<br><span>${km < 1 ? Math.round(km * 1000) + ' m' : (km < 100 ? km.toFixed(1) : Math.round(km)) + ' km'} away${hit.time > state.budget ? ' · over budget' : ''}</span>`;
   tip.hidden = false;
   tip.style.left = `${px + 14}px`;
   tip.style.top = `${py + 14}px`;
@@ -647,7 +659,7 @@ function writeHash() {
 function syncControls() {
   document.querySelectorAll('[data-mode]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.mode === state.mode));
   document.querySelectorAll('[data-view]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.view === state.view));
-  budgetInput.value = state.budget;
+  budgetInput.value = budgetIndex(state.budget);
   $('#budget-val').textContent = formatMinutes(state.budget);
   $('#legend-max').textContent = formatMinutes(state.budget);
   $('#legend-mode').textContent = MODES[state.mode].label.toLowerCase();
@@ -660,7 +672,7 @@ function readHash() {
   const lng = Number(m[1]);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
   if (MODES[m[2]]) state.mode = m[2];
-  if (Number(m[3]) >= 5 && Number(m[3]) <= 120) state.budget = Number(m[3]);
+  if (Number(m[3]) >= 5 && Number(m[3]) <= 720) state.budget = Number(m[3]);
   if (VIEWS[m[4]]) state.view = m[4];
   syncControls();
   map.setView([lat, lng], 12);

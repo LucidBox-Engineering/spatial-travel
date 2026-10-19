@@ -220,7 +220,7 @@ export class WarpRenderer {
         ctx.lineWidth = isBudget ? 2 : 1;
         ctx.strokeStyle = isBudget ? 'rgba(222,38,84,0.9)' : 'rgba(40,50,70,0.55)';
         ctx.stroke();
-        const label = `${Math.round(t)} min`;
+        const label = formatTime(t);
         const ly = oy - r;
         if (ly > 10) {
           const w = ctx.measureText(label).width + 10;
@@ -278,4 +278,11 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+function formatTime(t) {
+  if (t < 90) return `${Math.round(t)} min`;
+  const h = Math.floor(t / 60);
+  const m = Math.round(t - h * 60);
+  return m ? `${h} h ${m}` : `${h} h`;
 }
