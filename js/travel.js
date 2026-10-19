@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=34';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=34';
-import { cached, DAY } from './cache.js?v=34';
+import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=35';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=35';
+import { cached, DAY } from './cache.js?v=35';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -86,7 +86,7 @@ function heuristicReach(mode, minutes) {
 
 // The fetched area depends on a bucketed budget so that small slider moves can
 // reuse the same data.
-const BUCKETS = [10, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720];
+export const BUCKETS = [10, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720];
 
 export function extentFor(mode, budget) {
   const bucket = BUCKETS.find((b) => b >= budget) ?? BUCKETS[BUCKETS.length - 1];
@@ -502,6 +502,11 @@ async function realEgress(dest, stations, signal) {
   return out;
 }
 
+// Measured walks per station (keyed by its rounded coordinates), shared
+// across reloads in this page: [{ lat, lng, w (minutes) }].
+const walkSamples = new Map();
+let walkSampleCount = 0;
+
 async function refineAccess(dest, mesh, stations, best, envelope, signal, onStatus) {
   const first = timesViaStations(mesh, stations, best);
   const DEST = stations.length; // pseudo-station: walk straight to the destination
@@ -541,10 +546,44 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
   }
   if (!vcands.size) return { times: first, refined: 0 };
 
+  // samples[k] = list of { x, y, ratio } measured around station k
+  const samples = new Map();
+  const measured = new Map(); // `${x},${y},${k}` -> minutes
+  const ll = (x, y) => fromLocal(dest, x, y);
+  const stationKey = (k) => {
+    const b = k === DEST ? dest : ll(pos(k).x, pos(k).y);
+    return `${b.lat.toFixed(5)},${b.lng.toFixed(5)}`;
+  };
+  const record = (x, y, k, w) => {
+    const p = pos(k);
+    const d = Math.hypot(x - p.x, y - p.y);
+    if (d > walkRange()) return;
+    measured.set(`${Math.round(x)},${Math.round(y)},${k}`, w);
+    if (!samples.has(k)) samples.set(k, []);
+    samples.get(k).push({ x, y, ratio: w / Math.max(0.5, crowWalk(d)) });
+  };
+  // Walks measured by earlier runs (before a max-walk or budget change) are
+  // reused. A vertex only needs a new request for a station with no
+  // measured walk nearby, since ratios come from the nearest sample.
+  for (let k = 0; k <= DEST; k++) {
+    for (const smp of walkSamples.get(stationKey(k)) || []) {
+      const [x, y] = toLocal(dest, smp.lat, smp.lng);
+      record(x, y, k, smp.w);
+    }
+  }
+  const cover = walkRange() / 3;
+  for (const [v, cands] of vcands) {
+    const missing = cands.filter((k) => !(samples.get(k) || []).some((smp) => Math.hypot(smp.x - mesh.x[v], smp.y - mesh.y[v]) < cover));
+    if (missing.length) vcands.set(v, missing);
+    else vcands.delete(v);
+  }
+
   // Batch spatially: split the area into square tiles and send one
   // many-to-many request per tile (its sample points x the stations they
   // could use). Each request then returns up to ~2,000 useful pairs instead
-  // of ~100. Tiles grow until there are at most MAX_REQUESTS of them.
+  // of ~100. Tiles grow until there are at most MAX_REQUESTS of them, or
+  // fewer when only a few points are left to measure (after reuse).
+  const maxTiles = Math.min(MAX_REQUESTS, Math.max(1, Math.ceil(vcands.size / 25)));
   let tile = 2000;
   let tiles;
   for (;;) {
@@ -554,7 +593,7 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
       if (!tiles.has(key)) tiles.set(key, []);
       tiles.get(key).push(v);
     }
-    if (tiles.size <= MAX_REQUESTS) break;
+    if (tiles.size <= maxTiles) break;
     tile *= 1.3;
   }
   const batches = [];
@@ -572,10 +611,6 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
   // Nearest the destination first: those matter most if we run out of time.
   batches.sort((p, q) => Math.hypot(mesh.x[p.sources[0]], mesh.y[p.sources[0]]) - Math.hypot(mesh.x[q.sources[0]], mesh.y[q.sources[0]]));
 
-  // samples[k] = list of { x, y, ratio } measured around station k
-  const samples = new Map();
-  const measured = new Map(); // `${v},${k}` -> minutes
-  const ll = (x, y) => fromLocal(dest, x, y);
   let done = 0;
   const queue = batches.slice();
   const deadline = performance.now() + DEADLINE_MS;
@@ -601,12 +636,12 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
         b.targets.forEach((k, j) => {
           const w = m[i][j];
           if (!Number.isFinite(w)) return;
-          const p = pos(k);
-          const d = Math.hypot(mesh.x[v] - p.x, mesh.y[v] - p.y);
-          if (d > walkRange()) return;
-          measured.set(`${v},${k}`, w);
-          if (!samples.has(k)) samples.set(k, []);
-          samples.get(k).push({ x: mesh.x[v], y: mesh.y[v], ratio: w / Math.max(0.5, crowWalk(d)) });
+          const key = stationKey(k);
+          if (!walkSamples.has(key)) walkSamples.set(key, []);
+          const a = ll(mesh.x[v], mesh.y[v]);
+          walkSamples.get(key).push({ lat: a.lat, lng: a.lng, w });
+          if (++walkSampleCount > 200000) (walkSamples.clear(), (walkSampleCount = 0)); // keep memory bounded
+          record(mesh.x[v], mesh.y[v], k, w);
         }),
       );
     }

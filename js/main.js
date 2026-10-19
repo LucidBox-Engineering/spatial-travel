@@ -1,9 +1,9 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson, UNREACHABLE } from './travel.js?v=34';
-import { createMesh, computeWarps, blendPositions, locate, forward, sampleTime } from './warp.js?v=34';
-import { buildBasemap, detailLayout } from './basemap.js?v=34';
-import { THEMES } from './vectormap.js?v=34';
-import { WarpRenderer, LIMIT_SLACK } from './renderer.js?v=34';
-import { fromLocal, worldPx } from './geo.js?v=34';
+import { MODES, BUCKETS, extentFor, computeTimes, heuristicTimes, fetchJson, UNREACHABLE } from './travel.js?v=35';
+import { createMesh, computeWarps, blendPositions, locate, forward, sampleTime } from './warp.js?v=35';
+import { buildBasemap, detailLayout } from './basemap.js?v=35';
+import { THEMES } from './vectormap.js?v=35';
+import { WarpRenderer, LIMIT_SLACK } from './renderer.js?v=35';
+import { fromLocal, worldPx } from './geo.js?v=35';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -231,9 +231,21 @@ async function reverseGeocode(dest) {
   }
 }
 
-function dataKey() {
-  const { bucket } = extentFor(state.mode, state.budget);
-  return `${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)}|${state.mode}|${bucket}${state.mode === 'train' ? `|w${state.maxWalk}` : ''}`;
+// Data depends on the destination, mode and (train) max walk; the fetched
+// area on the budget's bucket.
+function baseKey() {
+  return `${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)}|${state.mode}${state.mode === 'train' ? `|w${state.maxWalk}` : ''}`;
+}
+
+// Loaded data for a larger budget already holds every time a smaller one
+// needs (same model, bigger area), so shrinking the budget only re-warps.
+// Beyond two buckets down the area is needlessly coarse, so reload then.
+const REUSE_BUCKETS = 2;
+function covers(d) {
+  if (!d || d.baseKey !== baseKey()) return false;
+  const need = BUCKETS.indexOf(extentFor(state.mode, state.budget).bucket);
+  const have = BUCKETS.indexOf(d.bucket);
+  return need <= have && have - need <= REUSE_BUCKETS;
 }
 
 const basemapCache = new Map();
@@ -270,15 +282,26 @@ function getBasemap(dest, radius) {
       updateLoader();
     }
   });
-  basemapCache.clear(); // keep memory bounded: only the latest
+  // Keep memory bounded: the few most recent (a budget or max-walk change
+  // often comes back to one of them).
   basemapCache.set(key, bm);
+  while (basemapCache.size > 3) basemapCache.delete(basemapCache.keys().next().value);
   return bm;
 }
 
+let bgLoad = false; // a background reload is in flight
+
 async function reload() {
   if (!state.dest || !renderer) return;
-  const key = dataKey();
-  if (data?.key === key) {
+  if (covers(data)) {
+    if (bgLoad) {
+      // Back within what's loaded: drop the update that was under way.
+      ++loadToken;
+      abortCtrl?.abort();
+      bgLoad = false;
+      setStatus('Travel times loaded.', 'ok');
+    }
+    writeHash();
     rewarp();
     return;
   }
@@ -288,8 +311,13 @@ async function reload() {
   const signal = abortCtrl.signal;
   writeHash();
 
+  // Same destination and mode with a result on screen: compute the new
+  // result in the background and swap it in when ready, keeping the current
+  // map meanwhile (max-walk changes, larger budgets).
+  const background = !!data?.ready && data.baseKey.split('|')[0] === baseKey().split('|')[0] && data.mode === state.mode;
+  bgLoad = background;
+
   const { radius, bucket } = extentFor(state.mode, state.budget);
-  // Reuse the mesh's extent for walk/drive/train only when identical.
   const mesh = createMesh(radius);
   const basemap = getBasemap(state.dest, radius);
   const uvs = new Float32Array(mesh.count * 2);
@@ -300,54 +328,64 @@ async function reload() {
     uvs[2 * v + 1] = w;
   }
   const times = heuristicTimes(state.mode, mesh);
-  data = { key, mesh, basemap, uvs, times, source: 'Loading…', stations: null, lines: null, bucket };
-  renderer.setMesh(mesh, uvs);
-  renderer.setTimeField(null);
-  clearDetail();
-  uploadBase(basemap);
-  renderer.setTimes(times);
-  renderer._lastTimes = times;
-  warps = computeWarps(mesh, times, state.budget);
-  renderer.setWarps(warps);
-  // Until real travel times arrive, show the plain map (no warp, no time
-  // shading); the loader indicates progress.
-  data.ready = false;
-  tween(renderer.state, 'strength', 0, 500);
-  tween(renderer.state, 'shade', 0, 300);
-  renderLineLegend(null);
-  setStatus('Calculating travel times…', 'busy');
-  updateSourceLine();
-  anim.dirty = true;
+  const next = { key: `${baseKey()}|${bucket}`, baseKey: baseKey(), mode: state.mode, mesh, basemap, uvs, times, source: 'Loading…', stations: null, lines: null, bucket, ready: false };
+  if (!background) {
+    data = next;
+    renderer.setMesh(mesh, uvs);
+    renderer.setTimeField(null);
+    clearDetail();
+    uploadBase(basemap);
+    renderer.setTimes(times);
+    renderer._lastTimes = times;
+    warps = computeWarps(mesh, times, state.budget);
+    renderer.setWarps(warps);
+    // Until real travel times arrive, show the plain map (no warp, no time
+    // shading); the loader indicates progress.
+    tween(renderer.state, 'strength', 0, 500);
+    tween(renderer.state, 'shade', 0, 300);
+    renderLineLegend(null);
+    updateSourceLine();
+    anim.dirty = true;
+  }
+  setStatus(background ? 'Updating travel times…' : 'Calculating travel times…', 'busy');
+  const current = () => token === loadToken && (background || data === next);
 
   try {
     const res = await computeTimes(state.dest, state.mode, mesh, signal, (msg) => {
       if (token === loadToken) setStatus(msg, 'busy');
     }, bucket, { maxWalk: state.maxWalk });
-    if (token !== loadToken) return;
+    if (!current()) return;
     if (res.failed) {
-      showFailure(`${res.source}. Try again in a moment.`);
+      if (background) {
+        bgLoad = false;
+        setStatus(`${res.source}; showing the previous result. Try again in a moment.`, 'warn');
+      } else showFailure(`${res.source}. Try again in a moment.`);
       return;
     }
-    data.times = res.times;
-    data.source = res.source;
+    next.times = res.times;
+    next.source = res.source;
+    next.stations = res.stations || null;
+    next.lines = res.lines || null;
+    next.field = res.field || null;
+    next.legend = res.legend || null;
     // Let the map finish drawing before warping it (up to 4 s), so the
     // basemap is in place first rather than filling in mid-animation.
-    const myData = data;
-    await Promise.race([data.basemap.done, new Promise((r) => setTimeout(r, 4000))]);
-    if (token !== loadToken || data !== myData) return;
-    data.stations = res.stations || null;
-    data.lines = res.lines || null;
-    data.field = res.field || null;
-    refreshLineTextures();
-    renderLineLegend(res.legend || null);
-    showResult(res.times);
+    await Promise.race([basemap.done, new Promise((r) => setTimeout(r, 4000))]);
+    if (!current()) return;
+    next.grid = await buildTimeGrid(next, next.field, current);
+    if (!current()) return;
+    bgLoad = false;
+    install(next, background);
     const est = /estimate/i.test(res.source);
     setStatus(est ? 'Using estimated travel times.' : 'Travel times loaded.', est ? 'warn' : 'ok');
     updateSourceLine();
   } catch (err) {
     if (signal.aborted) return;
     console.error(err);
-    showFailure('Could not load travel times.');
+    if (background) {
+      bgLoad = false;
+      setStatus('Could not update travel times; showing the previous result.', 'warn');
+    } else showFailure('Could not load travel times.');
   }
 }
 
@@ -380,22 +418,32 @@ function renderLineLegend(legend) {
   }
 }
 
-// Real times are in: shade the map and warp it into the selected view.
-async function showResult(times) {
-  data.times = times;
-  const myData = data;
-  data.grid = await buildTimeGrid(myData, myData.field);
-  if (data !== myData) return;
-  renderer.setTimeField(data.grid?.data, data.grid?.n, data.grid?.R);
+// Real times are in: shade the map and warp it into the selected view. When
+// replacing a result already on screen, swap mesh, texture and times in one
+// frame (no fade through the plain map).
+function install(next, replacing) {
+  const prev = data;
+  data = next;
+  // The style may have changed while this was loading (same layout and uv).
+  next.basemap = getBasemap(state.dest, next.mesh.radius);
+  if (replacing) {
+    renderer.setMesh(next.mesh, next.uvs);
+    if (prev?.basemap !== next.basemap) clearDetail();
+  }
+  refreshLineTextures();
+  renderLineLegend(next.legend);
+  renderer.setTimeField(next.grid?.data, next.grid?.n, next.grid?.R);
   data.ready = true;
-  renderer.setTimes(times);
-  renderer._lastTimes = times;
-  warps = computeWarps(data.mesh, times, state.budget);
+  renderer.setTimes(next.times);
+  renderer._lastTimes = next.times;
+  warps = computeWarps(next.mesh, next.times, state.budget);
   renderer.setWarps(warps);
+  renderer.state.budget = state.budget;
   updateLeafletReach();
   computeStationReach();
   tween(renderer.state, 'shade', 1, 500);
   applyView();
+  anim.dirty = true;
 }
 
 // Which stations lie inside the budget (for greying the others).
@@ -427,7 +475,7 @@ function timeAt(x, y) {
   return (v(x0, y0) * (1 - ax) + v(x1, y0) * ax) * (1 - ay) + (v(x0, y1) * (1 - ax) + v(x1, y1) * ax) * ay;
 }
 
-async function buildTimeGrid(myData, field) {
+async function buildTimeGrid(myData, field, isCurrent) {
   const n = GRID_N;
   const R = myData.mesh.radius;
   const fn = field || ((x, y) => sampleTime(myData.mesh, myData.times, x, y));
@@ -442,7 +490,7 @@ async function buildTimeGrid(myData, field) {
     }
     if (j % 64 === 63) {
       await new Promise((r) => setTimeout(r, 0)); // keep the page responsive
-      if (data !== myData) return null;
+      if (!isCurrent()) return null;
     }
   }
   // Light smoothing: separable 5-tap Gaussian.
@@ -550,10 +598,7 @@ budgetInput.addEventListener('input', () => {
   if (!data) return;
   rewarp();
   clearTimeout(budgetTimer);
-  budgetTimer = setTimeout(() => {
-    writeHash();
-    if (dataKey() !== data.key) reload();
-  }, 450);
+  budgetTimer = setTimeout(reload, 450);
 });
 
 function formatMinutes(m) {
