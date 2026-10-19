@@ -53,7 +53,7 @@ function median(arr) {
 // Light angular smoothing, then make time non-decreasing along each ray so
 // the warped mesh never folds over itself.
 function monotoneTimes(mesh, times) {
-  const { NT, NR, idx, radii, radius } = mesh;
+  const { NT, NR, idx } = mesh;
   const sm = new Float64Array(mesh.count);
   sm[0] = 0;
   for (let j = 1; j <= NR; j++) {
@@ -62,14 +62,14 @@ function monotoneTimes(mesh, times) {
         (times[idx(j, i + NT - 1)] + 2 * times[idx(j, i)] + times[idx(j, i + 1)]) / 4;
     }
   }
-  const tMax = Math.max(1, ...Array.from(sm).filter(Number.isFinite));
   const mono = new Float64Array(mesh.count);
   for (let i = 0; i < NT; i++) {
     let prev = 0;
     for (let j = 1; j <= NR; j++) {
       const v = idx(j, i);
-      const minStep = (0.002 * tMax * (radii[j] - radii[j - 1])) / radius;
-      prev = Math.max(Number.isFinite(sm[v]) ? sm[v] : prev, prev + minStep);
+      // No minimum step: a stretch of ray with no added travel time
+      // collapses to zero width and disappears from the warped map.
+      if (Number.isFinite(sm[v]) && sm[v] > prev) prev = sm[v];
       mono[v] = prev;
     }
   }
@@ -97,9 +97,10 @@ function reachPerRay(mesh, mono, budget) {
 }
 
 // Magnification as a function of travel time: x3 at the destination, x1 at
-// the budget, x1/3 at twice the budget.
+// the budget, x1/3 at twice the budget, x1/9 at three times, and so on with
+// no floor.
 export function sizeScale(t, budget) {
-  return Math.min(4, Math.max(0.12, Math.exp(Math.log(3) * (1 - t / budget))));
+  return Math.exp(Math.log(3) * (1 - t / budget));
 }
 
 export function computeWarps(mesh, times, budget) {

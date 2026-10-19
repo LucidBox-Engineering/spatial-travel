@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=5';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=5';
-import { buildBasemap } from './basemap.js?v=5';
-import { WarpRenderer } from './renderer.js?v=5';
-import { fromLocal } from './geo.js?v=5';
+import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=6';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=6';
+import { buildBasemap } from './basemap.js?v=6';
+import { WarpRenderer } from './renderer.js?v=6';
+import { fromLocal } from './geo.js?v=6';
 
 const $ = (sel) => document.querySelector(sel);
 
