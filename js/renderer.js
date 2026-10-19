@@ -236,6 +236,22 @@ export class WarpRenderer {
 
     if (this.overlayDraw) this.overlayDraw(ctx, this);
 
+    // Ripples radiating from the destination while travel times load.
+    if (s.loading) {
+      const now = performance.now() / 1000;
+      const maxR = Math.min(this.width, this.height) * 0.42;
+      ctx.save();
+      for (let k = 0; k < 3; k++) {
+        const u = (now / 2.4 + k / 3) % 1;
+        ctx.beginPath();
+        ctx.arc(ox, oy, 10 + u * maxR, 0, Math.PI * 2);
+        ctx.lineWidth = 2.5 * (1 - u) + 0.5;
+        ctx.strokeStyle = `rgba(222,38,84,${0.55 * (1 - u) * (1 - u)})`;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // Destination pin
     ctx.save();
     ctx.setLineDash([]);

@@ -10,7 +10,7 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=3';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=4';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -171,7 +171,7 @@ async function roadTimes(dest, mode, mesh, signal, onStatus) {
       let done = 0;
       for (let s = 0; s < samples.length; s += provider.chunk) {
         const chunk = samples.slice(s, s + provider.chunk);
-        onStatus?.(`Fetching ${MODES[mode].label.toLowerCase()} times from ${provider.name}… ${Math.round((100 * done) / samples.length)}%`);
+        onStatus?.(`Getting ${MODES[mode].label.toLowerCase()} times… ${Math.round((100 * done) / samples.length)}%`);
         const res = await provider.table(dest, chunk, signal);
         res.forEach((t, k) => (out[s + k] = t));
         done += chunk.length;
@@ -329,7 +329,7 @@ export function heuristicTimes(mode, mesh) {
 // Returns { times: Float32Array (per mesh vertex), source: string, stations? }
 export async function computeTimes(dest, mode, mesh, signal, onStatus) {
   if (mode === 'train') {
-    onStatus?.('Fetching rail & metro stations from OpenStreetMap…');
+    onStatus?.('Finding train stations…');
     const stations = await fetchStations(dest, mesh.radius * 1.15, signal);
     if (stations && stations.length) {
       return {

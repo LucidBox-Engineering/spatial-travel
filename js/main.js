@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=3';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=3';
-import { buildBasemap } from './basemap.js?v=3';
-import { WarpRenderer } from './renderer.js?v=3';
-import { fromLocal } from './geo.js?v=3';
+import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=4';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=4';
+import { buildBasemap } from './basemap.js?v=4';
+import { WarpRenderer } from './renderer.js?v=4';
+import { fromLocal } from './geo.js?v=4';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -104,6 +104,7 @@ function frame(now) {
     });
     anim.dirty = true;
   }
+  if (renderer?.state.loading && warps) anim.dirty = true;
   if (anim.dirty && renderer) {
     fitView();
     renderer.render();
@@ -150,6 +151,24 @@ function setStatus(text, kind = '') {
   const el = $('#status');
   el.textContent = text;
   el.dataset.kind = kind;
+  loading.times = kind === 'busy' ? text : null;
+  updateLoader();
+}
+
+// Loading indicator: a pill with spinner + message over the map, and
+// ripples expanding from the destination (drawn by the renderer).
+const loading = { times: null, tiles: null };
+
+function updateLoader() {
+  const msg = loading.times || loading.tiles;
+  const el = $('#loader');
+  el.classList.toggle('show', !!msg);
+  if (msg) $('#loader-text').textContent = msg.replace(/…\s*\d+%$/, '…');
+  const pct = loading.times ? /(\d+)%$/.exec(loading.times)?.[1] : loading.tilesPct;
+  $('#loader-bar').style.width = pct != null ? `${Math.max(4, pct)}%` : '';
+  $('#loader').classList.toggle('indeterminate', pct == null);
+  if (renderer) renderer.state.loading = !!loading.times;
+  anim.dirty = true;
 }
 
 async function setDestination(dest, name) {
@@ -197,7 +216,12 @@ function getBasemap(dest, radius) {
   const key = `${dest.lat.toFixed(5)},${dest.lng.toFixed(5)}|${Math.round(radius)}`;
   if (basemapCache.has(key)) return basemapCache.get(key);
   let pending = false;
-  const bm = buildBasemap(dest, radius, renderer.maxTex, () => {
+  const bm = buildBasemap(dest, radius, renderer.maxTex, (done, total) => {
+    if (data?.basemap === bm || !data) {
+      loading.tiles = done < total ? 'Loading map…' : null;
+      loading.tilesPct = done < total ? Math.round((100 * done) / total) : null;
+      updateLoader();
+    }
     if (pending) return;
     pending = true;
     setTimeout(() => {
@@ -214,6 +238,11 @@ function getBasemap(dest, radius) {
       anim.dirty = true;
     }
     $('#tiles-src').textContent = info.loaded ? info.source : 'unavailable (offline)';
+    if (data?.basemap === bm) {
+      loading.tiles = null;
+      loading.tilesPct = null;
+      updateLoader();
+    }
   });
   basemapCache.clear(); // keep memory bounded: only the latest
   basemapCache.set(key, bm);
@@ -254,7 +283,7 @@ async function reload() {
   renderer.setWarps(warps);
   applyView();
   updateLeafletReach();
-  setStatus('Estimating…', 'busy');
+  setStatus('Calculating travel times…', 'busy');
   updateSourceLine();
   anim.dirty = true;
 

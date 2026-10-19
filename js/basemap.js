@@ -1,7 +1,7 @@
 // Stitches raster map tiles around the destination into one square canvas
 // that the WebGL renderer uses as a texture.
 
-import { worldPx, EARTH_CIRC } from './geo.js?v=3';
+import { worldPx, EARTH_CIRC } from './geo.js?v=4';
 
 // OpenStreetMap's standard tiles: free, no API key, CORS-enabled. To stay
 // within the OSM tile usage policy we fetch a modest number of 256px tiles
@@ -90,10 +90,11 @@ export function buildBasemap(center, radius, maxTex, onProgress, signal) {
 
   const done = (async () => {
     const queue = tiles.slice();
+    let finished = 0;
     const workers = Array.from({ length: 4 }, async () => {
       while (queue.length && !signal?.aborted) {
         await loadTile(queue.shift());
-        onProgress?.();
+        onProgress?.(++finished, tiles.length);
       }
     });
     await Promise.all(workers);
