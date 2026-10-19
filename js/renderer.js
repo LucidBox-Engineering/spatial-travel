@@ -27,12 +27,18 @@ precision highp float;
 in vec2 v_uv;
 in float v_time;
 uniform sampler2D u_tex;
+uniform sampler2D u_detail; // sharper re-render of the zoomed-in area
+uniform vec4 u_detailRect;  // its extent in base uv (u0, v0, u1, v1); u1 <= u0 = none
 uniform float u_budget;
 uniform float u_shade;
 uniform vec2 u_style; // x: tint strength inside budget, y: wash strength beyond
 out vec4 outColor;
 void main() {
   vec3 base = texture(u_tex, v_uv).rgb;
+  vec2 duv = (v_uv - u_detailRect.xy) / (u_detailRect.zw - u_detailRect.xy);
+  if (u_detailRect.z > u_detailRect.x && all(greaterThanEqual(duv, vec2(0.0))) && all(lessThanEqual(duv, vec2(1.0)))) {
+    base = texture(u_detail, duv).rgb;
+  }
   float t = v_time / u_budget;
 
   // Beyond the budget: desaturate and wash out.
@@ -84,7 +90,7 @@ export class WarpRenderer {
     this.prog = prog;
     this.loc = {};
     for (const a of ['a_orig', 'a_dist', 'a_size', 'a_uv', 'a_time']) this.loc[a] = gl.getAttribLocation(prog, a);
-    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_shade', 'u_style'])
+    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_shade', 'u_style', 'u_detail', 'u_detailRect'])
       this.loc[u] = gl.getUniformLocation(prog, u);
     this.vao = gl.createVertexArray();
     this.buffers = {};
@@ -147,9 +153,25 @@ export class WarpRenderer {
     this._buffer('a_size', warps.size, 2);
   }
 
+  // Higher-resolution texture for part of the base texture (rect in base uv),
+  // or null to drop it.
+  setDetail(canvas, rect) {
+    if (!canvas) {
+      this.detailRect = null;
+      return;
+    }
+    this.detailTex ||= this.gl.createTexture();
+    this.detailRect = rect;
+    this._upload(this.detailTex, canvas);
+  }
+
   setTexture(canvas) {
+    this._upload(this.tex, canvas);
+  }
+
+  _upload(tex, canvas) {
     const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
     gl.generateMipmap(gl.TEXTURE_2D);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
@@ -182,6 +204,11 @@ export class WarpRenderer {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
       gl.uniform1i(this.loc.u_tex, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.detailRect ? this.detailTex : this.tex);
+      gl.uniform1i(this.loc.u_detail, 1);
+      const r = this.detailRect || [0, 0, 0, 0];
+      gl.uniform4f(this.loc.u_detailRect, r[0], r[1], r[2], r[3]);
       gl.uniform2f(this.loc.u_center, s.cx, s.cy);
       gl.uniform1f(this.loc.u_scale, s.scale);
       gl.uniform2f(this.loc.u_res, this.width, this.height);

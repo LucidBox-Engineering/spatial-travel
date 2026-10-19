@@ -1,8 +1,8 @@
 // Stitches raster map tiles around the destination into one square canvas
 // that the WebGL renderer uses as a texture.
 
-import { worldPx, EARTH_CIRC } from './geo.js?v=23';
-import { buildVectorBasemap, THEMES } from './vectormap.js?v=23';
+import { worldPx, EARTH_CIRC } from './geo.js?v=25';
+import { buildVectorBasemap, THEMES } from './vectormap.js?v=25';
 
 // OpenStreetMap's standard tiles: free, no API key, CORS-enabled. To stay
 // within the OSM tile usage policy we fetch a modest number of 256px tiles
@@ -47,9 +47,31 @@ export function textureLayout(center, radius, maxTex) {
   return { size, tileSize, z, cx, cy, ox, oy, uv };
 }
 
-export function buildBasemap(center, radius, maxTex, onProgress, signal, theme = 'osm') {
-  if (theme !== 'osm') return buildVectorBasemap(textureLayout(center, radius, maxTex), THEMES[theme] || THEMES.peach, onProgress, signal);
-  const { size, tileSize, z, cx, cy, ox, oy, uv } = textureLayout(center, radius, maxTex);
+// Layout for a sharper re-render of part of a base layout: `rect` is
+// [u0, v0, u1, v1] in the base texture's uv (square), drawn into a texture
+// of the same size at a higher zoom.
+export function detailLayout(base, rect) {
+  const span = rect[2] - rect[0];
+  // floor: the detail texture must cover at least the requested span
+  const k = Math.max(1, Math.min(6, Math.floor(Math.log2(1 / span))));
+  const z = Math.min(19, base.z + k);
+  const scale = Math.pow(2, z - base.z);
+  const covered = 1 / scale; // base-uv span actually covered after rounding k
+  const u0 = (rect[0] + rect[2]) / 2 - covered / 2;
+  const v0 = (rect[1] + rect[3]) / 2 - covered / 2;
+  const ox = (base.ox + u0 * base.size) * scale;
+  const oy = (base.oy + v0 * base.size) * scale;
+  return {
+    size: base.size, tileSize: 256, z, ox, oy, cx: ox + base.size / 2, cy: oy + base.size / 2,
+    rect: [u0, v0, u0 + covered, v0 + covered],
+    uv: null,
+  };
+}
+
+export function buildBasemap(center, radius, maxTex, onProgress, signal, theme = 'osm', layoutOverride = null) {
+  const layout = layoutOverride || textureLayout(center, radius, maxTex);
+  if (theme !== 'osm') return buildVectorBasemap(layout, THEMES[theme] || THEMES.peach, onProgress, signal);
+  const { size, tileSize, z, cx, cy, ox, oy, uv } = layout;
 
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;

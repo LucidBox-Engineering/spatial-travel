@@ -1,9 +1,9 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=23';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=23';
-import { buildBasemap } from './basemap.js?v=23';
-import { THEMES } from './vectormap.js?v=23';
-import { WarpRenderer } from './renderer.js?v=23';
-import { fromLocal } from './geo.js?v=23';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=25';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=25';
+import { buildBasemap, detailLayout } from './basemap.js?v=25';
+import { THEMES } from './vectormap.js?v=25';
+import { WarpRenderer } from './renderer.js?v=25';
+import { fromLocal } from './geo.js?v=25';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -237,6 +237,7 @@ function frame(now) {
     anim.dirty = true;
   }
   if (renderer?.state.loading && warps) anim.dirty = true;
+  if (renderer) watchViewForDetail(now);
   if (anim.dirty && renderer) {
     fitView();
     renderer.render();
@@ -409,8 +410,9 @@ async function reload() {
     uvs[2 * v + 1] = w;
   }
   const times = heuristicTimes(state.mode, mesh);
-  data = { key, mesh, basemap, times, source: 'Loading…', stations: null, lines: null, bucket };
+  data = { key, mesh, basemap, uvs, times, source: 'Loading…', stations: null, lines: null, bucket };
   renderer.setMesh(mesh, uvs);
+  clearDetail();
   renderer.setTexture(basemap.canvas);
   renderer.setTimes(times);
   renderer._lastTimes = times;
@@ -437,6 +439,11 @@ async function reload() {
     }
     data.times = res.times;
     data.source = res.source;
+    // Let the map finish drawing before warping it (up to 4 s), so the
+    // basemap is in place first rather than filling in mid-animation.
+    const myData = data;
+    await Promise.race([data.basemap.done, new Promise((r) => setTimeout(r, 4000))]);
+    if (token !== loadToken || data !== myData) return;
     data.stations = res.stations || null;
     data.lines = res.lines || null;
     renderLineLegend(res.legend || null);
@@ -597,6 +604,76 @@ function applyThemeShading() {
   anim.dirty = true;
 }
 
+// ---------------------------------------------------------------------------
+// Sharper map when zoomed in: once the view has been still for a moment,
+// re-render just the visible area at a higher zoom into a second texture
+// that the shader uses inside its rect (raster tiles or vector styles alike).
+
+const detail = { key: null, changedAt: 0, requested: null, ctrl: null, layout: null };
+
+function clearDetail() {
+  detail.ctrl?.abort();
+  Object.assign(detail, { requested: null, ctrl: null, layout: null });
+  renderer?.setDetail(null);
+  anim.dirty = true;
+}
+
+function watchViewForDetail(now) {
+  const s = renderer.state;
+  const key = `${s.cx.toFixed(1)},${s.cy.toFixed(1)},${s.scale.toPrecision(6)},${s.strength.toFixed(3)},${s.blend.toFixed(3)}`;
+  if (key !== detail.key) {
+    detail.key = key;
+    detail.changedAt = now;
+    return;
+  }
+  if (now - detail.changedAt < 450 || detail.requested === key || !data?.ready) return;
+  detail.requested = key;
+  requestDetail();
+}
+
+function requestDetail() {
+  const pos = currentPositions();
+  const { uvs, mesh, basemap } = data;
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (let v = 0; v < mesh.count; v++) {
+    const [sx, sy] = renderer.toScreen(pos[2 * v], pos[2 * v + 1]);
+    if (sx < -40 || sy < -40 || sx > renderer.width + 40 || sy > renderer.height + 40) continue;
+    u0 = Math.min(u0, uvs[2 * v]); u1 = Math.max(u1, uvs[2 * v]);
+    v0 = Math.min(v0, uvs[2 * v + 1]); v1 = Math.max(v1, uvs[2 * v + 1]);
+  }
+  if (!(u1 > u0)) return;
+  const span = Math.max(u1 - u0, v1 - v0) * 1.1;
+  if (span > 0.55) {
+    // Not zoomed in enough for the base texture to look soft.
+    if (detail.layout) clearDetail();
+    return;
+  }
+  const cu = (u0 + u1) / 2;
+  const cv = (v0 + v1) / 2;
+  // Already have a sharp-enough texture covering this view?
+  const L = detail.layout;
+  if (L && L.rect[0] <= cu - span / 2 && L.rect[2] >= cu + span / 2 && L.rect[1] <= cv - span / 2 && L.rect[3] >= cv + span / 2 && L.rect[2] - L.rect[0] <= span * 2.2) return;
+  detail.ctrl?.abort();
+  const ctrl = new AbortController();
+  const layout = detailLayout(basemap, [cu - span / 2, cv - span / 2, cu + span / 2, cv + span / 2]);
+  Object.assign(detail, { ctrl, layout });
+  let pending = false;
+  const upload = () => {
+    if (detail.ctrl !== ctrl) return;
+    renderer.setDetail(bm.canvas, layout.rect);
+    anim.dirty = true;
+  };
+  const bm = buildBasemap(null, null, renderer.maxTex, () => {
+    if (pending) return;
+    pending = true;
+    setTimeout(() => {
+      pending = false;
+      upload();
+    }, 250);
+  }, ctrl.signal, state.theme, layout);
+  bm.done.then(upload);
+}
+
 // Map style: swapping only rebuilds the texture (same layout, same uv).
 document.querySelectorAll('[data-theme]').forEach((b) =>
   b.addEventListener('click', () => {
@@ -605,6 +682,7 @@ document.querySelectorAll('[data-theme]').forEach((b) =>
     syncControls();
     writeHash();
     if (!data) return;
+    clearDetail();
     const bm = getBasemap(state.dest, data.mesh.radius);
     data.basemap = bm;
     renderer.setTexture(bm.canvas);

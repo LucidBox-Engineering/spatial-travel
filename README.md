@@ -37,3 +37,10 @@ Map styles (this branch): Peach / Citrus / Flannel / Auburn draw OpenFreeMap vec
 No build step. Run locally with any static server, e.g. `npx http-server .`. Deployed to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`.
 
 When changing JS/CSS, bump the `?v=` query in `index.html` and the `import` lines in `js/` so browsers pick up the new files.
+
+## Credits
+
+- Map styles (Peach, Citrus, Flannel, Auburn) are inspired by [prettymapp](https://github.com/chrieke/prettymapp) by Christoph Rieke, itself based on [prettymaps](https://github.com/marceloprates/prettymaps) by Marcelo Prates. No code is copied; the palettes and the approach (flat colours, streets by class width, buildings in a small palette) follow its look.
+- Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors; vector tiles from [OpenFreeMap](https://openfreemap.org) (© OpenMapTiles); raster tiles from openstreetmap.org.
+- Public transit timetables via [Transitous](https://transitous.org); routing via FOSSGIS OSRM/Valhalla; geocoding via Nominatim; rail data via Overpass.
+- Vendored libraries: [Leaflet](https://leafletjs.com) (BSD-2), [pbf](https://github.com/mapbox/pbf) (BSD-3), [@mapbox/vector-tile](https://github.com/mapbox/vector-tile-js) (BSD-3), [@mapbox/point-geometry](https://github.com/mapbox/point-geometry) (ISC).

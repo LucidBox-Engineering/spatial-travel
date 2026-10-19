@@ -564,3 +564,12 @@ footer {
   background: conic-gradient(var(--a) 0 33%, var(--b) 0 66%, var(--c) 0);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12);
 }
+
+.credit {
+  margin: 6px 0 0;
+}
+
+.credit a,
+footer a {
+  color: inherit;
+}
