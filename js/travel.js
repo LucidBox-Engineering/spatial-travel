@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=18';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=18';
-import { cached, DAY } from './cache.js?v=18';
+import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=19';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=19';
+import { cached, DAY } from './cache.js?v=19';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -85,7 +85,7 @@ export function extentFor(mode, budget) {
 // cache.js) so revisiting a destination doesn't re-request.
 const throttle = (gap) => ({ gap, next: 0, chain: Promise.resolve(), pausedUntil: 0 });
 const THROTTLED = {
-  'routing.openstreetmap.de': throttle(1100), // FOSSGIS OSRM (walk/drive/train walking)
+  'routing.openstreetmap.de': throttle(1500), // FOSSGIS OSRM (walk/drive/train walking)
   'valhalla1.openstreetmap.de': throttle(1100), // FOSSGIS Valhalla fallback
   'router.project-osrm.org': throttle(1100), // OSRM demo server fallback
   'nominatim.openstreetmap.org': throttle(1100), // usage policy: max 1 request/second
@@ -409,7 +409,8 @@ const FOOT_TABLE = 'https://routing.openstreetmap.de/routed-foot/table/v1/foot';
 const WALK_RANGE = 1500; // crow-fly metres considered "walkable" to a station
 const MAX_COORDS = 100; // per OSRM table request
 const MAX_REQUESTS = 8;
-const MAX_TARGETS = 30; // stations per request; the rest of the slots are sample points
+const MAX_TARGETS = 15; // stations per request
+const MAX_SOURCES = 50; // sample points per request (keeps each table ~750 pairs; big ones drew 429s)
 const CONCURRENCY = 2; // the shared throttle spaces request starts anyway
 const DEADLINE_MS = 12000; // stop issuing requests after this; unsampled pairs are interpolated
 const crowWalk = (d) => (d * 1.25) / 75;
@@ -514,7 +515,7 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
     const targets = [...count.keys()].sort((p, q) => count.get(q) - count.get(p)).slice(0, MAX_TARGETS);
     const chosen = new Set(targets);
     const usable = verts.filter((v) => vcands.get(v).some((k) => chosen.has(k)));
-    const n = Math.min(usable.length, MAX_COORDS - targets.length);
+    const n = Math.min(usable.length, MAX_SOURCES, MAX_COORDS - targets.length);
     const sources = Array.from({ length: n }, (_, i) => usable[Math.floor((i * usable.length) / n)]);
     if (sources.length && targets.length) batches.push({ targets, sources });
   }
@@ -598,6 +599,59 @@ const TRANSITOUS_VERSIONS = ['v6', 'v5', 'v4', 'v3', 'v2', 'v1']; // newest firs
 // "RAIL" = high-speed, long-distance, night, regional, suburban and subway;
 // TRAM adds light rail such as Calgary's CTrain.
 const TRAIN_MODES = 'RAIL,TRAM';
+const RAIL_MODES = new Set([
+  'RAIL', 'HIGHSPEED_RAIL', 'LONG_DISTANCE', 'NIGHT_RAIL', 'REGIONAL_RAIL', 'REGIONAL_FAST_RAIL',
+  'SUBURBAN', 'SUBWAY', 'METRO', 'TRAM',
+]);
+
+// Google encoded polyline -> [[lat, lng], ...]
+function decodePolyline(str, precision) {
+  const f = Math.pow(10, precision || 6);
+  const out = [];
+  let i = 0;
+  let lat = 0;
+  let lng = 0;
+  while (i < str.length) {
+    for (const which of [0, 1]) {
+      let shift = 0;
+      let result = 0;
+      let b;
+      do {
+        b = str.charCodeAt(i++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20 && i < str.length);
+      const d = result & 1 ? ~(result >> 1) : result >> 1;
+      if (which === 0) lat += d;
+      else lng += d;
+    }
+    out.push([lat / f, lng / f]);
+  }
+  return out;
+}
+
+// Rail/tram route shapes in the area, for drawing the lines on the map
+// (MOTIS "experimental/map/routes"; optional - failures just mean no lines).
+async function transitousLines(dest, radius, signal) {
+  const b = bboxAround(dest, radius);
+  const zoom = Math.max(6, Math.min(15, Math.round(Math.log2((EARTH_CIRC * Math.cos((dest.lat * Math.PI) / 180)) / (2 * radius)) + 3)));
+  const q = new URLSearchParams({ zoom: String(zoom), min: `${b.south.toFixed(5)},${b.west.toFixed(5)}`, max: `${b.north.toFixed(5)},${b.east.toFixed(5)}` });
+  const json = await fetchJson(`${TRANSITOUS}/api/experimental/map/routes?${q}`, signal, 30000);
+  const routes = json.routes || [];
+  const lines = [];
+  for (const pl of json.polylines || []) {
+    const rs = (pl.routeIndexes || []).map((i) => routes[i]).filter(Boolean);
+    const rail = rs.filter((r) => RAIL_MODES.has(r.mode));
+    if (!rail.length || !pl.polyline?.points) continue;
+    const colour = pl.colors?.[0] || rail[0].transitRoutes?.[0]?.color;
+    const pts = decodePolyline(pl.polyline.points, pl.polyline.precision).map(([la, ln]) => {
+      const [x, y] = toLocal(dest, la, ln);
+      return { x, y };
+    });
+    lines.push({ metro: rail.every((r) => r.mode === 'SUBWAY' || r.mode === 'TRAM'), colour: colour ? `#${colour.replace(/^#/, '')}` : null, pts });
+  }
+  return lines;
+}
 
 // Arrive by 09:00 on the next weekday (browser local time) - a typical
 // commute, and a stable URL so results cache well.
@@ -636,33 +690,47 @@ async function transitousStops(dest, maxMinutes, signal) {
     }
   }
   if (!json) throw lastErr || new Error('Transitous: no usable endpoint');
-  const all = (json.all || []).filter((r) => r.place && Number.isFinite(r.place.lat) && Number.isFinite(r.duration));
+  // Keep rail/tram stops reached by at least one ride (k >= 1). Without this
+  // filter the result includes every bus stop within walking distance of a
+  // station, and walk-only places near the destination.
+  const all = (json.all || []).filter((r) => {
+    if (!r.place || !Number.isFinite(r.place.lat) || !Number.isFinite(r.duration)) return false;
+    if (r.k != null && r.k < 1) return false;
+    const modes = r.place.modes;
+    return !Array.isArray(modes) || !modes.length || modes.some((m) => RAIL_MODES.has(m));
+  });
   // `duration` is documented only as "total travel duration"; MOTIS reports
   // minutes, but guard against seconds.
   const maxD = Math.max(0, ...all.map((r) => r.duration));
   const toMin = maxD > maxMinutes * 3 ? 1 / 60 : 1;
-  // Merge platforms / entrances of one station (within 60 m), keeping the
-  // fastest time.
-  const MERGE = 60;
+  // One entry per station: group platforms by GTFS parent station, else merge
+  // stops within 150 m. Position = mean of the platforms, time = fastest.
+  const MERGE = 150;
   const stops = [];
+  const byParent = new Map();
   const grid = new Map();
   for (const r of all) {
     const [x, y] = toLocal(dest, r.place.lat, r.place.lon);
     const best = r.duration * toMin;
+    let hit = r.place.parentId ? byParent.get(r.place.parentId) : null;
     const cx = Math.floor(x / MERGE);
     const cy = Math.floor(y / MERGE);
-    let hit = null;
     for (let dx = -1; dx <= 1 && !hit; dx++) {
       for (let dy = -1; dy <= 1 && !hit; dy++) {
         hit = (grid.get(`${cx + dx},${cy + dy}`) || []).find((s) => Math.hypot(s.x - x, s.y - y) < MERGE) || null;
       }
     }
     if (hit) {
+      hit.n++;
+      hit.x += (x - hit.x) / hit.n;
+      hit.y += (y - hit.y) / hit.n;
       hit.best = Math.min(hit.best, best);
       continue;
     }
-    const stop = { x, y, best, k: r.k ?? null, name: r.place.name || '', metro: false, lines: 1 };
+    const metro = Array.isArray(r.place.modes) && r.place.modes.some((m) => m === 'SUBWAY' || m === 'TRAM');
+    const stop = { x, y, n: 1, best, k: r.k ?? null, name: r.place.name || '', metro, lines: 1 };
     stops.push(stop);
+    if (r.place.parentId) byParent.set(r.place.parentId, stop);
     const key = `${cx},${cy}`;
     if (!grid.has(key)) grid.set(key, []);
     grid.get(key).push(stop);
@@ -672,21 +740,28 @@ async function transitousStops(dest, maxMinutes, signal) {
 
 async function trainTimesTransitous(dest, mesh, signal, onStatus, budget) {
   onStatus?.('Asking Transitous for timetable routes…');
-  const { stops, when } = await transitousStops(dest, Math.ceil(budget * 1.3), signal);
+  const [{ stops, when }, lines] = await Promise.all([
+    transitousStops(dest, Math.ceil(budget * 1.3), signal),
+    transitousLines(dest, mesh.radius, signal).catch((err) => {
+      if (signal?.aborted) throw err;
+      console.warn('Transitous route shapes unavailable:', err);
+      return null;
+    }),
+  ]);
   if (!stops.length) return null;
   const best = stops.map((s) => s.best);
   const label = `Transitous timetables (arrive ${when.toLocaleDateString(undefined, { weekday: 'short' })} 09:00), ${stops.length} stops`;
   const intercity = mesh.radius * 1.15 > INTERCITY_RADIUS;
   if (intercity) {
-    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops };
+    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops, lines };
   }
   try {
     const envelope = budget + Math.max(10, 0.25 * budget);
     const res = await refineAccess(dest, mesh, stops, best, envelope, signal, onStatus);
-    return { times: res.times, source: `${label}, ${res.refined} walking routes`, stations: stops };
+    return { times: res.times, source: `${label}, ${res.refined} walking routes`, stations: stops, lines };
   } catch (err) {
     if (signal?.aborted) throw err;
-    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops };
+    return { times: timesViaStations(mesh, stops, best), source: `${label}, walking estimated`, stations: stops, lines };
   }
 }
 
