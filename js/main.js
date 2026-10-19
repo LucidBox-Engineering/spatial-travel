@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=20';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=20';
-import { buildBasemap } from './basemap.js?v=20';
-import { WarpRenderer } from './renderer.js?v=20';
-import { fromLocal } from './geo.js?v=20';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=21';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=21';
+import { buildBasemap } from './basemap.js?v=21';
+import { WarpRenderer } from './renderer.js?v=21';
+import { fromLocal } from './geo.js?v=21';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -53,8 +53,10 @@ try {
 
 renderer &&
   (renderer.overlayDraw = (ctx, r) => {
-    if (!data?.stations || !warps) return;
+    if (!data?.ready || !warps) return;
     const pos = currentPositions();
+    drawIslandRings(ctx, r, pos);
+    if (!data.stations) return;
     // Project each station once per frame; lines reuse the projections.
     const proj = new Map();
     const project = (s) => {
@@ -125,6 +127,80 @@ renderer &&
     }
     ctx.restore();
   });
+
+// Small "islands" inside the budget that aren't connected to the main
+// reachable area (e.g. around a station) can be too small for the shader's
+// budget line to show. Find them as connected components of the mesh and
+// circle each one.
+const islandCache = { key: null, comps: [] };
+
+function meshAdjacency(mesh) {
+  if (mesh.adj) return mesh.adj;
+  const adj = Array.from({ length: mesh.count }, () => []);
+  const I = mesh.indices;
+  for (let n = 0; n < I.length; n += 3) {
+    const a = I[n], b = I[n + 1], c = I[n + 2];
+    adj[a].push(b, c);
+    adj[b].push(a, c);
+    adj[c].push(a, b);
+  }
+  return (mesh.adj = adj);
+}
+
+function islands() {
+  const times = renderer._lastTimes || data.times;
+  if (islandCache.times === times && islandCache.budget === state.budget && islandCache.mesh === data.mesh) return islandCache.comps;
+  const mesh = data.mesh;
+  const adj = meshAdjacency(mesh);
+  const comp = new Int32Array(mesh.count).fill(-1);
+  const comps = [];
+  for (let v = 0; v < mesh.count; v++) {
+    if (comp[v] !== -1 || !(times[v] <= state.budget)) continue;
+    const id = comps.length;
+    const members = [v];
+    comp[v] = id;
+    for (let i = 0; i < members.length; i++) {
+      for (const w of adj[members[i]]) {
+        if (comp[w] === -1 && times[w] <= state.budget) {
+          comp[w] = id;
+          members.push(w);
+        }
+      }
+    }
+    comps.push(members);
+  }
+  const main = comp[0]; // the destination's own reachable area
+  Object.assign(islandCache, { times, budget: state.budget, mesh, comps: comps.filter((_, i) => i !== main) });
+  return islandCache.comps;
+}
+
+function drawIslandRings(ctx, r, pos) {
+  const comps = islands();
+  if (!comps.length) return;
+  ctx.save();
+  ctx.setLineDash([]);
+  for (const members of comps) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const v of members) {
+      const [sx, sy] = r.toScreen(pos[2 * v], pos[2 * v + 1]);
+      minX = Math.min(minX, sx); maxX = Math.max(maxX, sx);
+      minY = Math.min(minY, sy); maxY = Math.max(maxY, sy);
+    }
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const rad = Math.max(8, Math.hypot(maxX - minX, maxY - minY) / 2 + 6);
+    if (cx + rad < 0 || cy + rad < 0 || cx - rad > r.width || cy - rad > r.height) continue;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.stroke();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#de2654';
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 
 let posCache = null;
 function currentPositions() {
