@@ -6,9 +6,9 @@
     <title>Time Warp Map</title>
     <meta name="description" content="A map that warps by travel time: closer in time means closer in space, or bigger." />
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="style.css?v=2" />
+    <link rel="stylesheet" href="style.css?v=3" />
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script type="module" src="js/main.js?v=2"></script>
+    <script type="module" src="js/main.js?v=3"></script>
   </head>
   <body>
     <aside id="panel">
@@ -64,7 +64,7 @@
       <section class="legend">
         <div class="bar"></div>
         <div class="ticks"><span>0</span><span id="legend-max">30 min</span><span>beyond</span></div>
-        <p class="small">Lines every quarter of your budget; the red line is your limit by <span id="legend-mode">drive</span>. Hover the map to read times. Scroll to zoom, drag to pan, double-click to reset.</p>
+        <p class="small">Lines every quarter of your budget; the red line is your limit by <span id="legend-mode">drive</span>. Hover or tap the map to read times. Drag to pan; scroll, pinch or use the +/− buttons to zoom; ⟲ or double-tap resets.</p>
       </section>
 
       <footer>
@@ -79,6 +79,11 @@
         <canvas id="warp-gl"></canvas>
         <canvas id="warp-overlay"></canvas>
         <div id="tooltip" hidden></div>
+        <div id="zoom-ctrl" role="group" aria-label="Zoom">
+          <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+          <button id="zoom-reset" type="button" aria-label="Reset view" title="Reset view">⟲</button>
+        </div>
         <p id="warp-error" hidden></p>
       </div>
       <button id="pick-btn" type="button" hidden>📍 Change destination</button>

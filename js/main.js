@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=2';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=2';
-import { buildBasemap } from './basemap.js?v=2';
-import { WarpRenderer } from './renderer.js?v=2';
-import { fromLocal } from './geo.js?v=2';
+import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=3';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=3';
+import { buildBasemap } from './basemap.js?v=3';
+import { WarpRenderer } from './renderer.js?v=3';
+import { fromLocal } from './geo.js?v=3';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -446,45 +446,140 @@ $('#search').addEventListener('submit', async (e) => {
   }
 });
 
-// Pan / zoom / hover on the warped map
+// Pan / zoom / hover on the warped map (mouse, touch and buttons)
 const stageEl = $('#warp-overlay');
-let drag = null;
+
+function viewNow() {
+  const s = renderer.state;
+  return { cx: s.cx, cy: s.cy, scale: s.scale };
+}
+
+function localPoint(e) {
+  const rect = stageEl.getBoundingClientRect();
+  return [e.clientX - rect.left, e.clientY - rect.top];
+}
+
+// Zoom by factor f keeping screen point (px, py) fixed.
+function zoomAt(px, py, f, base = viewNow()) {
+  const wx = (px - renderer.width / 2) / base.scale + base.cx;
+  const wy = (renderer.height / 2 - py) / base.scale + base.cy;
+  userView = { scale: base.scale * f, cx: wx - (wx - base.cx) / f, cy: wy - (wy - base.cy) / f };
+  anim.dirty = true;
+}
+
+function animateZoom(f) {
+  const base = viewNow();
+  const t0 = performance.now();
+  const step = (now) => {
+    const u = ease(Math.min(1, (now - t0) / 220));
+    zoomAt(renderer.width / 2, renderer.height / 2, Math.pow(f, u), base);
+    if (u < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function resetView() {
+  userView = null;
+  $('#tooltip').hidden = true;
+  anim.dirty = true;
+}
+
+$('#zoom-in').addEventListener('click', () => animateZoom(1.6));
+$('#zoom-out').addEventListener('click', () => animateZoom(1 / 1.6));
+$('#zoom-reset').addEventListener('click', resetView);
+
+// Active pointers: one pointer pans, two pointers pinch-zoom and pan.
+const pointers = new Map();
+let gesture = null;
+let lastTap = 0;
+
+function startGesture() {
+  const pts = [...pointers.values()];
+  const base = viewNow();
+  if (pts.length === 1) {
+    gesture = { kind: 'pan', start: pts[0], base, moved: false };
+  } else if (pts.length >= 2) {
+    const [a, b] = pts;
+    gesture = {
+      kind: 'pinch',
+      base,
+      dist: Math.max(1, Math.hypot(a[0] - b[0], a[1] - b[1])),
+      mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2],
+      moved: true,
+    };
+  } else {
+    gesture = null;
+  }
+}
+
 stageEl.addEventListener('pointerdown', (e) => {
   stageEl.setPointerCapture(e.pointerId);
-  const s = renderer.state;
-  drag = { x: e.clientX, y: e.clientY, cx: s.cx, cy: s.cy, scale: s.scale };
+  pointers.set(e.pointerId, localPoint(e));
+  startGesture();
+  if (e.pointerType !== 'mouse') hover(e);
 });
+
 stageEl.addEventListener('pointermove', (e) => {
-  if (drag) {
-    const dx = e.clientX - drag.x;
-    const dy = e.clientY - drag.y;
-    if (Math.abs(dx) + Math.abs(dy) > 2) {
-      userView = { cx: drag.cx - dx / drag.scale, cy: drag.cy + dy / drag.scale, scale: drag.scale };
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, localPoint(e));
+  if (gesture?.kind === 'pan') {
+    const [px, py] = pointers.get(e.pointerId) || localPoint(e);
+    const dx = px - gesture.start[0];
+    const dy = py - gesture.start[1];
+    if (gesture.moved || Math.abs(dx) + Math.abs(dy) > 4) {
+      gesture.moved = true;
+      const b = gesture.base;
+      userView = { cx: b.cx - dx / b.scale, cy: b.cy + dy / b.scale, scale: b.scale };
       anim.dirty = true;
+      if (e.pointerType !== 'mouse') $('#tooltip').hidden = true;
     }
+  } else if (gesture?.kind === 'pinch' && pointers.size >= 2) {
+    const [a, c] = [...pointers.values()];
+    const dist = Math.max(1, Math.hypot(a[0] - c[0], a[1] - c[1]));
+    const mid = [(a[0] + c[0]) / 2, (a[1] + c[1]) / 2];
+    const f = dist / gesture.dist;
+    const b = gesture.base;
+    // world point under the starting midpoint follows the current midpoint
+    const wx = (gesture.mid[0] - renderer.width / 2) / b.scale + b.cx;
+    const wy = (renderer.height / 2 - gesture.mid[1]) / b.scale + b.cy;
+    const scale = b.scale * f;
+    userView = {
+      scale,
+      cx: wx - (mid[0] - renderer.width / 2) / scale,
+      cy: wy - (renderer.height / 2 - mid[1]) / scale,
+    };
+    anim.dirty = true;
+    $('#tooltip').hidden = true;
+    return;
   }
-  hover(e);
+  if (e.pointerType === 'mouse' || !gesture?.moved) hover(e);
 });
-stageEl.addEventListener('pointerup', () => (drag = null));
-stageEl.addEventListener('pointerleave', () => ($('#tooltip').hidden = true));
+
+function endPointer(e) {
+  if (!pointers.has(e.pointerId)) return;
+  const wasTap = gesture?.kind === 'pan' && !gesture.moved;
+  pointers.delete(e.pointerId);
+  startGesture(); // continue with remaining finger(s) without jumping
+  if (wasTap && e.pointerType !== 'mouse') {
+    const now = performance.now();
+    if (now - lastTap < 300) resetView();
+    lastTap = now;
+  }
+}
+stageEl.addEventListener('pointerup', endPointer);
+stageEl.addEventListener('pointercancel', endPointer);
+stageEl.addEventListener('pointerleave', (e) => {
+  if (e.pointerType === 'mouse') $('#tooltip').hidden = true;
+});
 stageEl.addEventListener(
   'wheel',
   (e) => {
     e.preventDefault();
-    const s = renderer.state;
-    const rect = stageEl.getBoundingClientRect();
-    const [wx, wy] = renderer.toWorld(e.clientX - rect.left, e.clientY - rect.top);
-    const f = Math.exp(-e.deltaY * 0.0015);
-    const scale = s.scale * f;
-    userView = { scale, cx: wx - (wx - s.cx) / f, cy: wy - (wy - s.cy) / f };
-    anim.dirty = true;
+    const [px, py] = localPoint(e);
+    zoomAt(px, py, Math.exp(-e.deltaY * 0.0015));
   },
   { passive: false },
 );
-stageEl.addEventListener('dblclick', () => {
-  userView = null;
-  anim.dirty = true;
-});
+stageEl.addEventListener('dblclick', resetView);
 
 function hover(e) {
   const tip = $('#tooltip');

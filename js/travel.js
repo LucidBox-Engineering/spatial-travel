@@ -10,7 +10,7 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=2';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=3';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
