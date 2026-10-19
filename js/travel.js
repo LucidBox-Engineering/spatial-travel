@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround } from './geo.js?v=14';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=14';
-import { cached, DAY } from './cache.js?v=14';
+import { fromLocal, toLocal, bboxAround } from './geo.js?v=15';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=15';
+import { cached, DAY } from './cache.js?v=15';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -77,13 +77,18 @@ export function extentFor(mode, budget) {
 // ---------------------------------------------------------------------------
 // Network helpers
 
-// The free FOSSGIS routing server rate-limits per client (HTTP 429), so
-// requests to it are spaced out, a 429 is retried once after the server's
+// The free OSM-community services we call (FOSSGIS routing, the OSRM demo,
+// Nominatim) rate-limit per client (HTTP 429), so requests to them are
+// spaced out, a 429 is retried once after the server's
 // Retry-After, and repeated 429s pause all requests to it for a while (callers
 // then fall back to estimates). Successful responses are cached (see
 // cache.js) so revisiting a destination doesn't re-request.
+const throttle = (gap) => ({ gap, next: 0, chain: Promise.resolve(), pausedUntil: 0 });
 const THROTTLED = {
-  'routing.openstreetmap.de': { gap: 1100, next: 0, chain: Promise.resolve(), pausedUntil: 0 },
+  'routing.openstreetmap.de': throttle(1100), // FOSSGIS OSRM (walk/drive/train walking)
+  'valhalla1.openstreetmap.de': throttle(1100), // FOSSGIS Valhalla fallback
+  'router.project-osrm.org': throttle(1100), // OSRM demo server fallback
+  'nominatim.openstreetmap.org': throttle(1100), // usage policy: max 1 request/second
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -98,7 +103,7 @@ async function takeSlot(th) {
   release();
 }
 
-async function fetchJson(url, signal, timeoutMs = 20000, init = {}) {
+export async function fetchJson(url, signal, timeoutMs = 20000, init = {}) {
   const th = THROTTLED[new URL(url).host];
   // Routing responses are cached for a week (memory + IndexedDB).
   if (th && !init.method) return cached(`http:${url}`, 7 * DAY, () => fetchJsonNet(url, signal, timeoutMs, init, th));

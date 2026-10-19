@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=14';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=14';
-import { buildBasemap } from './basemap.js?v=14';
-import { WarpRenderer } from './renderer.js?v=14';
-import { fromLocal } from './geo.js?v=14';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=15';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=15';
+import { buildBasemap } from './basemap.js?v=15';
+import { WarpRenderer } from './renderer.js?v=15';
+import { fromLocal } from './geo.js?v=15';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -222,10 +222,10 @@ async function setDestination(dest, name) {
 
 async function reverseGeocode(dest) {
   try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&lat=${dest.lat}&lon=${dest.lng}`,
+    // Rounded so repeat visits hit the cache; throttled + cached via fetchJson.
+    const j = await fetchJson(
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&lat=${dest.lat.toFixed(5)}&lon=${dest.lng.toFixed(5)}`,
     );
-    const j = await res.json();
     if (state.dest === dest && j.display_name) {
       state.destName = j.display_name.split(',').slice(0, 3).join(',');
       $('#dest-name').textContent = state.destName;
@@ -473,8 +473,9 @@ $('#search').addEventListener('submit', async (e) => {
   if (!q) return;
   list.innerHTML = '<li class="muted">Searching…</li>';
   try {
-    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=${encodeURIComponent(q)}`);
-    const items = await res.json();
+    const items = await fetchJson(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=${encodeURIComponent(q.toLowerCase())}`,
+    );
     list.innerHTML = '';
     if (!items.length) list.innerHTML = '<li class="muted">No results</li>';
     for (const it of items) {
