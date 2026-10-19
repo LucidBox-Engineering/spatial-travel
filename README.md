@@ -33,3 +33,5 @@ Basemap tiles: OpenStreetMap standard tiles (© OpenStreetMap contributors), no 
 - `js/main.js` – UI.
 
 No build step. Run locally with any static server, e.g. `npx http-server .`. Deployed to GitHub Pages by `.github/workflows/pages.yml` on every push to `main`.
+
+When changing JS/CSS, bump the `?v=` query in `index.html` and the `import` lines in `js/` so browsers pick up the new files.
