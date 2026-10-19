@@ -1,8 +1,8 @@
-import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=8';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=8';
-import { buildBasemap } from './basemap.js?v=8';
-import { WarpRenderer } from './renderer.js?v=8';
-import { fromLocal } from './geo.js?v=8';
+import { MODES, extentFor, computeTimes, heuristicTimes } from './travel.js?v=9';
+import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=9';
+import { buildBasemap } from './basemap.js?v=9';
+import { WarpRenderer } from './renderer.js?v=9';
+import { fromLocal } from './geo.js?v=9';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -304,15 +304,18 @@ async function reload() {
     uvs[2 * v + 1] = w;
   }
   const times = heuristicTimes(state.mode, mesh);
-  data = { key, mesh, basemap, times, source: 'Quick estimate (loading real data…)', stations: null, lines: null, bucket };
+  data = { key, mesh, basemap, times, source: 'Loading…', stations: null, lines: null, bucket };
   renderer.setMesh(mesh, uvs);
   renderer.setTexture(basemap.canvas);
   renderer.setTimes(times);
   renderer._lastTimes = times;
   warps = computeWarps(mesh, times, state.budget);
   renderer.setWarps(warps);
-  applyView();
-  updateLeafletReach();
+  // Until real travel times arrive, show the plain map (no warp, no time
+  // shading); the loader indicates progress.
+  data.ready = false;
+  tween(renderer.state, 'strength', 0, 500);
+  tween(renderer.state, 'shade', 0, 300);
   setStatus('Calculating travel times…', 'busy');
   updateSourceLine();
   anim.dirty = true;
@@ -326,7 +329,7 @@ async function reload() {
     data.source = res.source;
     data.stations = res.stations || null;
     data.lines = res.lines || null;
-    morphTo(res.times);
+    showResult(res.times);
     const est = /estimate/i.test(res.source);
     setStatus(est ? 'Using estimated travel times.' : 'Travel times loaded.', est ? 'warn' : 'ok');
     updateSourceLine();
@@ -334,48 +337,21 @@ async function reload() {
     if (signal.aborted) return;
     console.error(err);
     setStatus('Could not load travel times — showing estimate.', 'warn');
+    showResult(data.times);
   }
 }
 
-// Smoothly blend from the current times/warps to new ones.
-function morphTo(newTimes) {
-  const myData = data;
-  const startWarps = warps;
-  const endWarps = computeWarps(data.mesh, newTimes, state.budget);
-  const startTimes = renderer._lastTimes || newTimes;
-  const t0 = performance.now();
-  const ms = 700;
-  const lerpArr = (a, b, u) => {
-    const out = new Float32Array(a.length);
-    for (let i = 0; i < a.length; i++) out[i] = a[i] + (b[i] - a[i]) * u;
-    return out;
-  };
-  const step = (now) => {
-    if (data !== myData) return;
-    const u = ease(Math.min(1, (now - t0) / ms));
-    const w = {
-      ...endWarps,
-      dist: lerpArr(startWarps.dist, endWarps.dist, u),
-      size: lerpArr(startWarps.size, endWarps.size, u),
-      reachMedian: startWarps.reachMedian + (endWarps.reachMedian - startWarps.reachMedian) * u,
-      k: startWarps.k + (endWarps.k - startWarps.k) * u,
-    };
-    warps = w;
-    renderer.setWarps(w);
-    const t = lerpArr(startTimes, newTimes, u);
-    renderer.setTimes(t);
-    renderer._lastTimes = t;
-    anim.dirty = true;
-    if (u < 1) requestAnimationFrame(step);
-    else {
-      warps = endWarps;
-      renderer.setWarps(endWarps);
-      renderer.setTimes(newTimes);
-      renderer._lastTimes = newTimes;
-      updateLeafletReach();
-    }
-  };
-  requestAnimationFrame(step);
+// Real times are in: shade the map and warp it into the selected view.
+function showResult(times) {
+  data.times = times;
+  data.ready = true;
+  renderer.setTimes(times);
+  renderer._lastTimes = times;
+  warps = computeWarps(data.mesh, times, state.budget);
+  renderer.setWarps(warps);
+  updateLeafletReach();
+  tween(renderer.state, 'shade', 1, 500);
+  applyView();
 }
 
 function rewarp() {
@@ -383,7 +359,7 @@ function rewarp() {
   warps = computeWarps(data.mesh, data.times, state.budget);
   renderer.setWarps(warps);
   renderer.state.budget = state.budget;
-  updateLeafletReach();
+  if (data.ready) updateLeafletReach();
   anim.dirty = true;
 }
 
@@ -410,8 +386,10 @@ function applyView() {
   if (!renderer) return;
   const v = VIEWS[state.view];
   renderer.state.budget = state.budget;
-  tween(renderer.state, 'strength', v.strength, 1100);
-  tween(renderer.state, 'blend', v.blend, 1100);
+  if (data?.ready) {
+    tween(renderer.state, 'strength', v.strength, 1100);
+    tween(renderer.state, 'blend', v.blend, 1100);
+  }
   document.querySelectorAll('[data-view]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === state.view));
   writeHash();
 }
@@ -655,7 +633,10 @@ stageEl.addEventListener('dblclick', resetView);
 
 function hover(e) {
   const tip = $('#tooltip');
-  if (!warps || !data) return;
+  if (!warps || !data?.ready) {
+    tip.hidden = true;
+    return;
+  }
   const rect = stageEl.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
