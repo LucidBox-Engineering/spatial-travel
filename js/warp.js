@@ -221,3 +221,22 @@ export function forward(mesh, pos, x, y) {
   const lerp = (a, c, t) => [a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t];
   return lerp(lerp(p00, p01, w), lerp(p10, p11, w), u);
 }
+
+// Travel time at a geographic local point, by bilinear interpolation in the
+// polar grid (smoother than the triangle interpolation the GPU would do).
+export function sampleTime(mesh, times, x, y) {
+  const r = Math.hypot(x, y);
+  if (r >= mesh.radius) return Infinity;
+  let th = Math.atan2(x, y);
+  if (th < 0) th += TAU;
+  const b = (th / TAU) * mesh.NT;
+  const i0 = Math.floor(b);
+  const w = b - i0;
+  let j = 0;
+  while (j < mesh.NR - 1 && mesh.radii[j + 1] < r) j++;
+  const u = (r - mesh.radii[j]) / (mesh.radii[j + 1] - mesh.radii[j]);
+  const T = (jj, ii) => times[mesh.idx(jj, ii)];
+  const a = T(j, i0) * (1 - w) + T(j, i0 + 1) * w;
+  const c = T(j + 1, i0) * (1 - w) + T(j + 1, i0 + 1) * w;
+  return a * (1 - u) + c * u;
+}

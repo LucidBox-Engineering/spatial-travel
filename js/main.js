@@ -1,9 +1,9 @@
-import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson } from './travel.js?v=28';
-import { createMesh, computeWarps, blendPositions, locate, forward } from './warp.js?v=28';
-import { buildBasemap, detailLayout } from './basemap.js?v=28';
-import { THEMES } from './vectormap.js?v=28';
-import { WarpRenderer, LIMIT_SLACK } from './renderer.js?v=28';
-import { fromLocal, worldPx } from './geo.js?v=28';
+import { MODES, extentFor, computeTimes, heuristicTimes, fetchJson, UNREACHABLE } from './travel.js?v=32';
+import { createMesh, computeWarps, blendPositions, locate, forward, sampleTime } from './warp.js?v=32';
+import { buildBasemap, detailLayout } from './basemap.js?v=32';
+import { THEMES } from './vectormap.js?v=32';
+import { WarpRenderer, LIMIT_SLACK } from './renderer.js?v=32';
+import { fromLocal, worldPx } from './geo.js?v=32';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -20,6 +20,7 @@ const state = {
   budget: 30,
   view: 'distance',
   theme: 'peach', // 'osm' or a key of THEMES (vectormap.js)
+  maxWalk: 15, // train mode: longest walk to / from a station, minutes
   picking: true,
 };
 
@@ -57,10 +58,7 @@ renderer &&
   (renderer.overlayDraw = (ctx, r) => {
     if (!data?.ready || !warps) return;
     const pos = currentPositions();
-    if (data.stations) {
-      drawSubMeshEnvelopes(ctx, r, pos);
-      drawStations(ctx, r, pos);
-    }
+    if (data.stations) drawStations(ctx, r, pos);
   });
 
 function drawStations(ctx, r, pos) {
@@ -91,40 +89,6 @@ function drawStations(ctx, r, pos) {
     });
     ctx.restore();
   }
-}
-
-// Some stations are inside the budget, but their walkable catchment (the
-// minutes left over, walked) is smaller than the mesh's resolution, so the
-// shader never sees time dip under the limit there. For those, draw the
-// missing piece of envelope directly: a walking-reach circle around the
-// station in the same red line (and a light tint), warped with the map.
-const WALK_M_PER_MIN = 60; // street distance ~1.25x crow-fly at 75 m/min
-
-function drawSubMeshEnvelopes(ctx, r, pos) {
-  if (!data.subMesh?.length) return;
-  ctx.save();
-  ctx.setLineDash([]);
-  for (const { st } of data.subMesh) {
-    const reachM = Math.max(30, (limit() - st.best) * WALK_M_PER_MIN);
-    const c = forward(data.mesh, pos, st.x, st.y);
-    const e = forward(data.mesh, pos, st.x + reachM, st.y);
-    const n = forward(data.mesh, pos, st.x, st.y + reachM);
-    if (!c || !e || !n) continue;
-    const [cx, cy] = r.toScreen(c[0], c[1]);
-    const [ex, ey] = r.toScreen(e[0], e[1]);
-    const [nx, ny] = r.toScreen(n[0], n[1]);
-    // at least 6 px so a station that is only just inside stays noticeable
-    const rad = Math.max(6, (Math.hypot(ex - cx, ey - cy) + Math.hypot(nx - cx, ny - cy)) / 2);
-    if (cx + rad < 0 || cy + rad < 0 || cx - rad > r.width || cy - rad > r.height) continue;
-    ctx.beginPath();
-    ctx.arc(cx, cy, rad, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255, 158, 31, 0.22)'; // the shader's near-limit amber tint
-    ctx.fill();
-    ctx.lineWidth = 2.2;
-    ctx.strokeStyle = 'rgba(222, 38, 84, 0.95)'; // the shader's budget-line red
-    ctx.stroke();
-  }
-  ctx.restore();
 }
 
 // The inside/outside threshold used everywhere (see LIMIT_SLACK).
@@ -269,7 +233,7 @@ async function reverseGeocode(dest) {
 
 function dataKey() {
   const { bucket } = extentFor(state.mode, state.budget);
-  return `${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)}|${state.mode}|${bucket}`;
+  return `${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)}|${state.mode}|${bucket}${state.mode === 'train' ? `|w${state.maxWalk}` : ''}`;
 }
 
 const basemapCache = new Map();
@@ -338,6 +302,7 @@ async function reload() {
   const times = heuristicTimes(state.mode, mesh);
   data = { key, mesh, basemap, uvs, times, source: 'Loading…', stations: null, lines: null, bucket };
   renderer.setMesh(mesh, uvs);
+  renderer.setTimeField(null);
   clearDetail();
   uploadBase(basemap);
   renderer.setTimes(times);
@@ -357,7 +322,7 @@ async function reload() {
   try {
     const res = await computeTimes(state.dest, state.mode, mesh, signal, (msg) => {
       if (token === loadToken) setStatus(msg, 'busy');
-    }, bucket);
+    }, bucket, { maxWalk: state.maxWalk });
     if (token !== loadToken) return;
     if (res.failed) {
       showFailure(`${res.source}. Try again in a moment.`);
@@ -372,6 +337,7 @@ async function reload() {
     if (token !== loadToken || data !== myData) return;
     data.stations = res.stations || null;
     data.lines = res.lines || null;
+    data.field = res.field || null;
     refreshLineTextures();
     renderLineLegend(res.legend || null);
     showResult(res.times);
@@ -415,8 +381,12 @@ function renderLineLegend(legend) {
 }
 
 // Real times are in: shade the map and warp it into the selected view.
-function showResult(times) {
+async function showResult(times) {
   data.times = times;
+  const myData = data;
+  data.grid = await buildTimeGrid(myData, myData.field);
+  if (data !== myData) return;
+  renderer.setTimeField(data.grid?.data, data.grid?.n, data.grid?.R);
   data.ready = true;
   renderer.setTimes(times);
   renderer._lastTimes = times;
@@ -432,15 +402,66 @@ function showResult(times) {
 function computeStationReach() {
   if (!data?.stations || !warps) return;
   const times = renderer._lastTimes || data.times;
-  data.stationIn = data.stations.map((st) => {
-    const meshTime = locate(data.mesh, warps.orig, times, st.x, st.y)?.time ?? Infinity;
-    return Math.min(meshTime, st.best ?? Infinity) <= limit();
-  });
-  // Stations whose own time is inside the budget but whose walkable
-  // catchment is smaller than the mesh can resolve (mesh time there is over).
-  data.subMesh = data.stations
-    .map((st, i) => ({ st, i, meshTime: locate(data.mesh, warps.orig, times, st.x, st.y)?.time ?? Infinity }))
-    .filter(({ st, meshTime }) => Number.isFinite(st.best) && st.best <= limit() && meshTime > limit());
+  data.stationIn = data.stations.map((st) => timeAt(st.x, st.y) <= limit());
+}
+
+// ---------------------------------------------------------------------------
+// Fine travel-time grid for shading. The mesh (a few hundred metres between
+// points) is right for the warp but too coarse for small walking catchments
+// around stations; the grid (~1024^2 over the area) is evaluated from the
+// same model, lightly smoothed, and sampled per pixel by the shader. Station
+// catchments then merge with the main envelope and render identically.
+
+const GRID_N = 1024;
+
+function timeAt(x, y) {
+  const g = data?.grid;
+  if (!g) return sampleTime(data.mesh, renderer._lastTimes || data.times, x, y);
+  const fx = ((x / g.R) * 0.5 + 0.5) * (g.n - 1);
+  const fy = (0.5 - (y / g.R) * 0.5) * (g.n - 1);
+  if (fx < 0 || fy < 0 || fx > g.n - 1 || fy > g.n - 1) return Infinity;
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const x1 = Math.min(g.n - 1, x0 + 1), y1 = Math.min(g.n - 1, y0 + 1);
+  const ax = fx - x0, ay = fy - y0;
+  const v = (i, j) => g.data[j * g.n + i];
+  return (v(x0, y0) * (1 - ax) + v(x1, y0) * ax) * (1 - ay) + (v(x0, y1) * (1 - ax) + v(x1, y1) * ax) * ay;
+}
+
+async function buildTimeGrid(myData, field) {
+  const n = GRID_N;
+  const R = myData.mesh.radius;
+  const fn = field || ((x, y) => sampleTime(myData.mesh, myData.times, x, y));
+  const cap = myData.bucket * 3; // far-outside values don't matter; keeps the blur honest
+  const g = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) {
+    const y = R - (2 * R * j) / (n - 1);
+    for (let i = 0; i < n; i++) {
+      const x = -R + (2 * R * i) / (n - 1);
+      const t = fn(x, y);
+      g[j * n + i] = Number.isFinite(t) ? Math.min(t, cap) : cap;
+    }
+    if (j % 64 === 63) {
+      await new Promise((r) => setTimeout(r, 0)); // keep the page responsive
+      if (data !== myData) return null;
+    }
+  }
+  // Light smoothing: separable 5-tap Gaussian.
+  const k = [1, 4, 6, 4, 1];
+  const tmp = new Float32Array(n * n);
+  for (const [src, dst, horiz] of [[g, tmp, true], [tmp, g, false]]) {
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        let acc = 0;
+        for (let o = -2; o <= 2; o++) {
+          const ii = horiz ? Math.min(n - 1, Math.max(0, i + o)) : i;
+          const jj = horiz ? j : Math.min(n - 1, Math.max(0, j + o));
+          acc += src[jj * n + ii] * k[o + 2];
+        }
+        dst[j * n + i] = acc / 16;
+      }
+    }
+  }
+  return { n, R, data: g };
 }
 
 function rewarp() {
@@ -502,6 +523,7 @@ document.querySelectorAll('[data-mode]').forEach((b) =>
     document.querySelectorAll('[data-mode]').forEach((x) => x.setAttribute('aria-pressed', x === b));
     userView = null;
     $('#legend-mode').textContent = MODES[state.mode].label.toLowerCase();
+    $('#train-opts').hidden = state.mode !== 'train';
     reload();
   }),
 );
@@ -687,6 +709,14 @@ function requestDetail() {
   detail.bm = bm;
   bm.done.then(upload);
 }
+
+// Train mode: longest walk to / from a station.
+const MAX_WALK_STEPS = [5, 10, 15, 20, 30];
+$('#max-walk').addEventListener('change', (e) => {
+  state.maxWalk = Number(e.target.value);
+  writeHash();
+  if (state.mode === 'train') reload();
+});
 
 // Map style: swapping only rebuilds the texture (same layout, same uv).
 document.querySelectorAll('[data-theme]').forEach((b) =>
@@ -898,12 +928,20 @@ function hover(e) {
   const py = e.clientY - rect.top;
   const [wx, wy] = renderer.toWorld(px, py);
   const hit = locate(data.mesh, currentPositions(), renderer._lastTimes || data.times, wx, wy);
+  if (hit) hit.time = timeAt(hit.x, hit.y); // the fine grid the colours come from
   if (!hit) {
     tip.hidden = true;
     return;
   }
   const km = Math.hypot(hit.x, hit.y) / 1000;
   const t = Math.round(hit.time);
+  if (hit.time >= UNREACHABLE * 0.99) {
+    tip.innerHTML = `<b>Not reachable</b> ${MODES[state.mode].icon}<br><span>more than a ${state.maxWalk} min walk from any useful station</span>`;
+    tip.hidden = false;
+    tip.style.left = `${px + 14}px`;
+    tip.style.top = `${py + 14}px`;
+    return;
+  }
   tip.innerHTML = `<b>${t < 1 ? '< 1 min' : formatMinutes(t)}</b> ${MODES[state.mode].icon}<br><span>${km < 1 ? Math.round(km * 1000) + ' m' : (km < 100 ? km.toFixed(1) : Math.round(km)) + ' km'} away${hit.time > limit() ? ' · over budget' : ''}</span>`;
   tip.hidden = false;
   tip.style.left = `${px + 14}px`;
@@ -920,7 +958,7 @@ window.addEventListener('resize', () => {
 
 function writeHash() {
   if (!state.dest) return;
-  const h = `#${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)},${state.mode},${state.budget},${state.view},${state.theme}`;
+  const h = `#${state.dest.lat.toFixed(5)},${state.dest.lng.toFixed(5)},${state.mode},${state.budget},${state.view},${state.theme},${state.maxWalk}`;
   if (location.hash !== h) history.replaceState(null, '', h);
 }
 
@@ -928,6 +966,8 @@ function syncControls() {
   document.querySelectorAll('[data-mode]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.mode === state.mode));
   document.querySelectorAll('[data-view]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.view === state.view));
   document.querySelectorAll('[data-theme]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.theme === state.theme));
+  $('#max-walk').value = String(state.maxWalk);
+  $('#train-opts').hidden = state.mode !== 'train';
   applyThemeShading();
   budgetInput.value = budgetIndex(state.budget);
   $('#budget-val').textContent = formatMinutes(state.budget);
@@ -945,6 +985,7 @@ function readHash() {
   if (Number(m[3]) >= 5 && Number(m[3]) <= 720) state.budget = Number(m[3]);
   if (VIEWS[m[4]]) state.view = m[4];
   if (m[5] === 'osm' || THEMES[m[5]]) state.theme = m[5];
+  if (MAX_WALK_STEPS.includes(Number(m[6]))) state.maxWalk = Number(m[6]);
   syncControls();
   map.setView([lat, lng], 12);
   setDestination({ lat, lng }, null);

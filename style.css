@@ -573,3 +573,22 @@ footer {
 footer a {
   color: inherit;
 }
+
+.sub-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.sub-opt select {
+  font: inherit;
+  color: var(--ink);
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}

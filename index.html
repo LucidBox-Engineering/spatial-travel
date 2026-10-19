@@ -6,9 +6,9 @@
     <title>Time Warp Map</title>
     <meta name="description" content="A map that warps by travel time: closer in time means closer in space, or bigger." />
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="style.css?v=28" />
+    <link rel="stylesheet" href="style.css?v=32" />
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script type="module" src="js/main.js?v=28"></script>
+    <script type="module" src="js/main.js?v=32"></script>
   </head>
   <body>
     <aside id="panel">
@@ -36,6 +36,16 @@
           <button type="button" data-mode="drive" aria-pressed="true">🚗 Drive</button>
           <button type="button" data-mode="train" aria-pressed="false">🚆 Train</button>
         </div>
+        <label id="train-opts" class="sub-opt" hidden>
+          Max walk to / from a station
+          <select id="max-walk">
+            <option value="5">5 min</option>
+            <option value="10">10 min</option>
+            <option value="15" selected>15 min</option>
+            <option value="20">20 min</option>
+            <option value="30">30 min</option>
+          </select>
+        </label>
       </section>
 
       <section>

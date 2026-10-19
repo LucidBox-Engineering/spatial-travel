@@ -17,6 +17,7 @@ uniform float u_strength;
 uniform float u_blend;
 out vec2 v_uv;
 out float v_time;
+out vec2 v_geo;
 void main() {
   vec2 target = mix(a_dist, a_size, u_blend);
   vec2 p = mix(a_orig, target, u_strength);
@@ -24,13 +25,17 @@ void main() {
   gl_Position = vec4(px / (u_res * 0.5), 0.0, 1.0);
   v_uv = a_uv;
   v_time = a_time;
+  v_geo = a_orig;
 }`;
 
 const FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 in float v_time;
+in vec2 v_geo;
 uniform sampler2D u_tex;
+uniform sampler2D u_timeTex; // fine travel-time grid over [-R, R]^2 (geographic metres)
+uniform float u_timeR;       // R; 0 = no grid, use the mesh-interpolated time
 uniform sampler2D u_detail; // sharper re-render of the zoomed-in area
 uniform vec4 u_detailRect;  // its extent in base uv (u0, v0, u1, v1); u1 <= u0 = none
 uniform float u_budget;
@@ -39,6 +44,8 @@ uniform float u_shade;
 uniform vec2 u_style; // x: tint strength inside budget, y: how much to lighten the greyscale beyond
 out vec4 outColor;
 void main() {
+  float vt = v_time;
+  if (u_timeR > 0.0) vt = texture(u_timeTex, vec2(v_geo.x / u_timeR * 0.5 + 0.5, 0.5 - v_geo.y / u_timeR * 0.5)).r;
   vec3 base = texture(u_tex, v_uv).rgb;
   vec2 duv = (v_uv - u_detailRect.xy) / (u_detailRect.zw - u_detailRect.xy);
   if (u_detailRect.z > u_detailRect.x && all(greaterThanEqual(duv, vec2(0.0))) && all(lessThanEqual(duv, vec2(1.0)))) {
@@ -46,7 +53,7 @@ void main() {
   }
   // "Within budget" means the time rounds to <= the budget (u_limit =
   // budget + 0.5 min), matching the minutes shown in the tooltip.
-  float t = v_time / u_limit;
+  float t = vt / u_limit;
 
   // Beyond the budget: fully greyscale (map, styles and transit lines alike),
   // lightened a little. The switch is about one pixel wide - right under the
@@ -62,14 +69,14 @@ void main() {
   col = mix(col, ramp, (1.0 - beyond) * u_style.x * u_shade);
 
   // Contours every quarter of the budget, and a strong line at the budget.
-  float q = v_time / (u_budget * 0.25);
+  float q = vt / (u_budget * 0.25);
   float wq = max(fwidth(q), 1e-4);
   float dq = abs(fract(q + 0.5) - 0.5) / wq;
-  float minor = (1.0 - smoothstep(0.4, 1.3, dq)) * step(q, 8.5) * step(0.5, abs(q - 4.0)); // q=4 is the budget line
+  float minor = (1.0 - smoothstep(0.4, 1.3, dq)) * step(q, 3.5); // inside only; q=4 is the budget line
   col = mix(col, vec3(0.16, 0.20, 0.27), minor * 0.35 * u_shade);
 
-  float wt = max(fwidth(v_time), 1e-4);
-  float dt = abs(v_time - u_limit) / wt;
+  float wt = max(fwidth(vt), 1e-4);
+  float dt = abs(vt - u_limit) / wt;
   float major = 1.0 - smoothstep(1.0, 2.4, dt);
   col = mix(col, vec3(0.87, 0.15, 0.33), major * 0.95 * u_shade);
 
@@ -100,7 +107,7 @@ export class WarpRenderer {
     this.prog = prog;
     this.loc = {};
     for (const a of ['a_orig', 'a_dist', 'a_size', 'a_uv', 'a_time']) this.loc[a] = gl.getAttribLocation(prog, a);
-    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_limit', 'u_shade', 'u_style', 'u_detail', 'u_detailRect'])
+    for (const u of ['u_center', 'u_scale', 'u_res', 'u_strength', 'u_blend', 'u_tex', 'u_budget', 'u_limit', 'u_shade', 'u_style', 'u_detail', 'u_detailRect', 'u_timeTex', 'u_timeR'])
       this.loc[u] = gl.getUniformLocation(prog, u);
     this.vao = gl.createVertexArray();
     this.buffers = {};
@@ -175,6 +182,25 @@ export class WarpRenderer {
     this._upload(this.detailTex, canvas);
   }
 
+  // Fine travel-time grid (Float32Array n*n, row 0 = north) covering
+  // [-R, R]^2 metres around the destination; null to fall back to the mesh.
+  setTimeField(grid, n, R) {
+    const gl = this.gl;
+    if (!grid) {
+      this.timeR = 0;
+      return;
+    }
+    this.timeTex ||= gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.timeTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, n, n, 0, gl.RED, gl.FLOAT, grid);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.timeR = R;
+  }
+
   setTexture(canvas) {
     this._upload(this.tex, canvas);
   }
@@ -219,6 +245,10 @@ export class WarpRenderer {
       gl.uniform1i(this.loc.u_detail, 1);
       const r = this.detailRect || [0, 0, 0, 0];
       gl.uniform4f(this.loc.u_detailRect, r[0], r[1], r[2], r[3]);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, this.timeR ? this.timeTex : this.tex);
+      gl.uniform1i(this.loc.u_timeTex, 2);
+      gl.uniform1f(this.loc.u_timeR, this.timeR || 0);
       gl.uniform2f(this.loc.u_center, s.cx, s.cy);
       gl.uniform1f(this.loc.u_scale, s.scale);
       gl.uniform2f(this.loc.u_res, this.width, this.height);

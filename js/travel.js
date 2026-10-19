@@ -10,9 +10,9 @@
 // If every network source fails the heuristic result is kept, so the app is
 // always usable.
 
-import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=28';
-import { fetchNetwork, stationTimes, overpass } from './transit.js?v=28';
-import { cached, DAY } from './cache.js?v=28';
+import { fromLocal, toLocal, bboxAround, EARTH_CIRC } from './geo.js?v=32';
+import { fetchNetwork, stationTimes, overpass } from './transit.js?v=32';
+import { cached, DAY } from './cache.js?v=32';
 
 export const MODES = {
   walk: { label: 'Walk', icon: '🚶' },
@@ -35,16 +35,35 @@ function driveHeuristic(d) {
   return dd / ((kmh * 1000) / 60) + 2;
 }
 
-// Getting to / from a station: walk up to 1.5 km, beyond that assume a
-// feeder bus or bike at ~18 km/h after a short wait.
+// Getting to / from a station on foot. Train mode is "walk + train": a walk
+// longer than the user's max walk (default 15 min) is effectively not an
+// option, rather than getting an imagined bus ride. (An
+// earlier feeder-bus assumption at 18 km/h in a straight line produced
+// perfect circles that ignored rivers.)
+export const UNREACHABLE = 1e4; // minutes; shown as "not reachable"
+const STATION_WALK_M_PER_MIN = 75; // along streets, 1.25 x crow-fly
+let maxWalk = 15;
+export function setMaxWalk(min) {
+  maxWalk = min;
+}
+const walkRange = () => (maxWalk * STATION_WALK_M_PER_MIN) / 1.25; // crow-fly metres
+
+// Past the max walk each extra minute costs 20, so such places fall outside
+// any sensible budget almost immediately. It's steep rather than a hard
+// jump so the map's boundary interpolates to the right place between grid
+// points instead of shrinking to jagged blobs.
+const OVER_WALK_PENALTY = 20;
+function walkCost(t) {
+  return t <= maxWalk ? t : Math.min(UNREACHABLE, maxWalk + (t - maxWalk) * OVER_WALK_PENALTY);
+}
+
 function stationAccess(d) {
-  const dd = d * 1.25;
-  if (dd <= 1500) return dd / 75;
-  return 1500 / 75 + 5 + (dd - 1500) / 300;
+  return walkCost((d * 1.25) / STATION_WALK_M_PER_MIN);
 }
 
 function trainHeuristic(d) {
-  return Math.min(stationAccess(d), 12 + (d * 1.25) / (45000 / 60));
+  // Only used to size the area and as a no-data fallback.
+  return Math.min((d * 1.25) / STATION_WALK_M_PER_MIN, 12 + (d * 1.25) / (45000 / 60));
 }
 
 export function heuristic(mode, d) {
@@ -365,32 +384,56 @@ function bestFromStationsOnly(stations) {
   });
 }
 
-// Per mesh vertex: soft minimum over "go directly" and "get to station k,
-// then best[k] from there", so station catchment boundaries blend instead of
-// forming sharp creases. `access(v, k, d)` is the time from vertex v to
-// station k (k = -1 means straight to the destination); d is crow-fly metres.
-const crowAccess = (v, k, d) => stationAccess(d);
+// Travel-time field from stations: at any point, a soft minimum over "walk
+// straight to the destination" and "walk to station k, then best[k] from
+// there", so catchment boundaries blend instead of forming sharp creases.
+// `access(x, y, k, d)` is the time from (x, y) to station k (k = -1: straight
+// to the destination); d is crow-fly metres. Stations are binned so a point
+// only looks at stations it could plausibly walk to.
+const crowAccess = (x, y, k, d) => stationAccess(d);
 
-function timesViaStations(mesh, stations, best, access = crowAccess) {
+function makeStationField(stations, best, access = crowAccess) {
   const TAU = 1.5;
-  const times = new Float32Array(mesh.count);
-  for (let v = 0; v < mesh.count; v++) {
-    const x = mesh.x[v];
-    const y = mesh.y[v];
-    let m = access(v, -1, Math.hypot(x, y));
+  const cell = Math.max(200, walkRange());
+  const reach = 2; // bins in each direction (covers the over-walk penalty slope)
+  const bins = new Map();
+  stations.forEach((s, k) => {
+    const key = `${Math.floor(s.x / cell)},${Math.floor(s.y / cell)}`;
+    if (!bins.has(key)) bins.set(key, []);
+    bins.get(key).push(k);
+  });
+  return (x, y) => {
+    let m = access(x, y, -1, Math.hypot(x, y));
     let sum = 1;
-    for (let k = 0; k < stations.length; k++) {
-      const s = stations[k];
-      const c = access(v, k, Math.hypot(x - s.x, y - s.y)) + best[k];
-      if (c < m) {
-        sum = sum * Math.exp((c - m) / TAU) + 1;
-        m = c;
-      } else if (c - m < 12 * TAU) {
-        sum += Math.exp((m - c) / TAU);
+    const cx = Math.floor(x / cell);
+    const cy = Math.floor(y / cell);
+    for (let i = -reach; i <= reach; i++) {
+      for (let j = -reach; j <= reach; j++) {
+        const list = bins.get(`${cx + i},${cy + j}`);
+        if (!list) continue;
+        for (const k of list) {
+          const s = stations[k];
+          const c = access(x, y, k, Math.hypot(x - s.x, y - s.y)) + best[k];
+          if (c < m) {
+            sum = sum * Math.exp((c - m) / TAU) + 1;
+            m = c;
+          } else if (c - m < 12 * TAU) {
+            sum += Math.exp((m - c) / TAU);
+          }
+        }
       }
     }
-    times[v] = Math.max(0, m - TAU * Math.log(sum));
-  }
+    return Math.max(0, m - TAU * Math.log(sum));
+  };
+}
+
+// Field sampled at the mesh vertices (for the warp); the field itself rides
+// along as `.field` for the fine shading grid.
+function timesViaStations(mesh, stations, best, access = crowAccess) {
+  const field = makeStationField(stations, best, access);
+  const times = new Float32Array(mesh.count);
+  for (let v = 0; v < mesh.count; v++) times[v] = field(mesh.x[v], mesh.y[v]);
+  times.field = field;
   return times;
 }
 
@@ -414,15 +457,14 @@ function timesViaStations(mesh, stations, best, access = crowAccess) {
 
 const INTERCITY_RADIUS = 150000; // fetch radius in metres; same as the mainline-only switch in transit.js
 const FOOT_TABLE = 'https://routing.openstreetmap.de/routed-foot/table/v1/foot';
-const WALK_RANGE = 1500; // crow-fly metres considered "walkable" to a station
 const MAX_COORDS = 100; // per OSRM table request
 const MAX_REQUESTS = 8;
 const MAX_TARGETS = 15; // stations per request
 const MAX_SOURCES = 50; // sample points per request (keeps each table ~750 pairs; big ones drew 429s)
 const CONCURRENCY = 2; // the shared throttle spaces request starts anyway
 const DEADLINE_MS = 12000; // stop issuing requests after this; unsampled pairs are interpolated
-const crowWalk = (d) => (d * 1.25) / 75;
-const feeder = (d) => (d * 1.25 > 1500 ? stationAccess(d) : Infinity);
+const crowWalk = (d) => (d * 1.25) / STATION_WALK_M_PER_MIN;
+const capWalk = walkCost;
 
 // Minutes walking from each source to each target (sources x targets).
 async function footMatrix(sources, targets, signal) {
@@ -445,7 +487,7 @@ async function footMatrix(sources, targets, signal) {
 async function realEgress(dest, stations, signal) {
   const near = [];
   stations.forEach((s, k) => {
-    if (Math.hypot(s.x, s.y) <= WALK_RANGE) near.push(k);
+    if (Math.hypot(s.x, s.y) <= walkRange()) near.push(k);
   });
   const out = new Map();
   for (let i = 0; i < near.length; i += MAX_COORDS - 1) {
@@ -470,13 +512,13 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
   const vcands = new Map(); // vertex id -> candidate stations
   const grid = new Map();
   stations.forEach((s, k) => {
-    const key = `${Math.floor(s.x / WALK_RANGE)},${Math.floor(s.y / WALK_RANGE)}`;
+    const key = `${Math.floor(s.x / walkRange())},${Math.floor(s.y / walkRange())}`;
     if (!grid.has(key)) grid.set(key, []);
     grid.get(key).push(k);
   });
   const nearby = (x, y) => {
-    const cx = Math.floor(x / WALK_RANGE);
-    const cy = Math.floor(y / WALK_RANGE);
+    const cx = Math.floor(x / walkRange());
+    const cy = Math.floor(y / walkRange());
     const out = [];
     for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) out.push(...(grid.get(`${cx + dx},${cy + dy}`) || []));
     return out;
@@ -486,11 +528,11 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
     const x = mesh.x[v];
     const y = mesh.y[v];
     const cands = nearby(x, y);
-    if (Math.hypot(x, y) <= WALK_RANGE) cands.push(DEST);
+    if (Math.hypot(x, y) <= walkRange()) cands.push(DEST);
     for (const k of cands) {
       const p = pos(k);
       const d = Math.hypot(x - p.x, y - p.y);
-      if (d > WALK_RANGE) continue;
+      if (d > walkRange()) continue;
       // Only stations that could plausibly be this vertex's best choice.
       if (crowWalk(d) + bestOf(k) > first[v] + 10) continue;
       if (!vcands.has(v)) vcands.set(v, []);
@@ -561,7 +603,7 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
           if (!Number.isFinite(w)) return;
           const p = pos(k);
           const d = Math.hypot(mesh.x[v] - p.x, mesh.y[v] - p.y);
-          if (d > WALK_RANGE) return;
+          if (d > walkRange()) return;
           measured.set(`${v},${k}`, w);
           if (!samples.has(k)) samples.set(k, []);
           samples.get(k).push({ x: mesh.x[v], y: mesh.y[v], ratio: w / Math.max(0.5, crowWalk(d)) });
@@ -571,15 +613,13 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-  const access = (v, k, d) => {
+  const access = (x, y, k, d) => {
     if (k === -1) k = DEST;
-    if (d > WALK_RANGE) return stationAccess(d);
-    const w = measured.get(`${v},${k}`);
-    if (w != null) return Math.min(w, feeder(d));
+    if (d > walkRange()) return stationAccess(d);
+    // Measured walking routes become per-station detour ratios; use the
+    // nearest measured point's ratio (exact at measured points).
     const list = samples.get(k);
     if (!list) return stationAccess(d);
-    const x = mesh.x[v];
-    const y = mesh.y[v];
     let bestD = Infinity;
     let ratio = 1;
     for (const smp of list) {
@@ -589,7 +629,7 @@ async function refineAccess(dest, mesh, stations, best, envelope, signal, onStat
         ratio = smp.ratio;
       }
     }
-    return Math.min(crowWalk(d) * ratio, feeder(d));
+    return capWalk(crowWalk(d) * ratio);
   };
   return { times: timesViaStations(mesh, stations, best, access), refined: measured.size };
 }
@@ -728,6 +768,8 @@ async function transitousStops(dest, maxMinutes, signal) {
       time: when.toISOString(),
       maxTravelTime: String(minutes),
       transitModes: TRAIN_MODES,
+      // the walk from the last station to the destination
+      maxPostTransitTime: String(Math.round(maxWalk * 60)),
     });
   let json = null;
   let lastErr = null;
@@ -857,7 +899,7 @@ async function trainTimesOsm(dest, mesh, signal, onStatus, budget) {
       }
     }
     onStatus?.('Routing through the rail network…');
-    const best = stationTimes(net, (s, k) => egress.get(k) ?? stationAccess(Math.hypot(s.x, s.y)));
+    const best = stationTimes(net, (s, k) => (egress.has(k) ? capWalk(egress.get(k)) : stationAccess(Math.hypot(s.x, s.y))));
     const idx = [];
     for (let k = 0; k < net.stations.length; k++) if (Number.isFinite(best[k])) idx.push(k);
     const stations = idx.map((k) => ({ ...net.stations[k], best: best[k] }));
@@ -917,8 +959,13 @@ export function heuristicTimes(mode, mesh) {
 
 // Returns { times: Float32Array (per mesh vertex), source: string, stations?, lines? }
 // or { failed: true, source } when the data servers could not be reached.
-export async function computeTimes(dest, mode, mesh, signal, onStatus, budget = 60) {
-  if (mode === 'train') return trainTimes(dest, mesh, signal, onStatus, budget);
+export async function computeTimes(dest, mode, mesh, signal, onStatus, budget = 60, opts = {}) {
+  if (mode === 'train') {
+    setMaxWalk(opts.maxWalk ?? 15);
+    const res = await trainTimes(dest, mesh, signal, onStatus, budget);
+    if (res.times?.field) res.field = res.times.field;
+    return res;
+  }
   const res = await roadTimes(dest, mode, mesh, signal, onStatus);
   if (res) return res;
   return { failed: true, source: 'Routing servers are busy' };
